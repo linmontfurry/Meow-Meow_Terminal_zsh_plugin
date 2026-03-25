@@ -69,8 +69,9 @@ RAM_USED=$(( (PAGES_ACTIVE + PAGES_WIRED + PAGES_COMPRESSED) * PAGE_SIZE / 1024 
 RAM_TOTAL=$(sysctl -n hw.memsize)
 RAM_TOTAL=$((RAM_TOTAL / 1024 / 1024))
 RAM_PERCENT=$(( RAM_USED * 100 / RAM_TOTAL ))
-DISK_TOTAL_RAW=$(df -H / | awk 'NR==2{print $2}')
-DISK_ROOT_USED_RAW=$(df -H / | awk 'NR==2{print $3}')
+DF_ROOT_STATS=$(df -H /)
+DISK_TOTAL_RAW=$(echo "$DF_ROOT_STATS" | awk 'NR==2{print $2}')
+DISK_ROOT_USED_RAW=$(echo "$DF_ROOT_STATS" | awk 'NR==2{print $3}')
 DISK_DATA_USED_RAW=$(df -H /System/Volumes/Data | awk 'NR==2{print $3}')
 
 if command -v memory_pressure >/dev/null 2>&1; then
