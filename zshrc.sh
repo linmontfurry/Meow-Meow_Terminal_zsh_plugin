@@ -69,9 +69,9 @@ RAM_USED=$(( (PAGES_ACTIVE + PAGES_WIRED + PAGES_COMPRESSED) * PAGE_SIZE / 1024 
 RAM_TOTAL=$(sysctl -n hw.memsize)
 RAM_TOTAL=$((RAM_TOTAL / 1024 / 1024))
 RAM_PERCENT=$(( RAM_USED * 100 / RAM_TOTAL ))
-DISK_INFO=$(df -H / | awk 'NR==2{print $2,$3}')
-DISK_TOTAL_RAW=$(echo $DISK_INFO | awk '{print $1}')
-DISK_USED_RAW=$(echo $DISK_INFO | awk '{print $2}')
+DISK_TOTAL_RAW=$(df -H / | awk 'NR==2{print $2}')
+DISK_ROOT_USED_RAW=$(df -H / | awk 'NR==2{print $3}')
+DISK_DATA_USED_RAW=$(df -H /System/Volumes/Data | awk 'NR==2{print $3}')
 
 if command -v memory_pressure >/dev/null 2>&1; then
   MEM_FREE_PERCENT=$(memory_pressure | awk '/System-wide memory free percentage/ {gsub("%",""); print $5}')
@@ -93,7 +93,7 @@ else
 fi
 
 DISK_TOTAL=$(convert_to_mb $DISK_TOTAL_RAW)
-DISK_USED=$(convert_to_mb $DISK_USED_RAW)
+DISK_USED=$(( $(convert_to_mb $DISK_ROOT_USED_RAW) + $(convert_to_mb $DISK_DATA_USED_RAW) ))
 [[ $DISK_TOTAL -eq 0 ]] && DISK_TOTAL=1
 DISK_PERCENT=$(( DISK_USED * 100 / DISK_TOTAL ))
 
