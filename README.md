@@ -31,6 +31,11 @@
    )
    ```
 
+4. 保存并重启终端, 或者:
+   ```bash
+   omz reload # or source ~/.zshrc
+   ```
+
 *参考资料：[Oh My Zsh Customization - Overriding and adding plugins](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization#overriding-and-adding-plugins)*
 
 # TODO list
