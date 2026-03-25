@@ -17,11 +17,11 @@
 
 1. 创建插件目录：
    ```bash
-   mkdir -p $ZSH_CUSTOM/plugins/meow-meow
+   mkdir -p "${ZSH_CUSTOM:-$ZSH/custom}"/plugins/meow-meow
    ```
 2. 下载脚本到该插件目录：
    ```bash
-   curl -L https://raw.githubusercontent.com/linmontfurry/Meow-Meow_Terminal_zsh_plugin/refs/heads/main/zshrc.sh -o $ZSH_CUSTOM/plugins/meow-meow/meow-meow.sh
+   curl -L https://raw.githubusercontent.com/linmontfurry/Meow-Meow_Terminal_zsh_plugin/refs/heads/main/zshrc.sh -o "${ZSH_CUSTOM:-$ZSH/custom}"/plugins/meow-meow/meow-meow.plugin.zsh
    ```
 3. 修改 `~/.zshrc`，在 `plugins` 列表中加上 `meow-meow`：
    ```bash
