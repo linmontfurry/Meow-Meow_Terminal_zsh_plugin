@@ -3,7 +3,7 @@
 
 # 使用方法
 
-目前暂时只支持 Mac OS 系列版本，使用其他系统安装这个可能会出现兼容性问题
+目前暂时支持 Mac OS 系列和Windows Powershell7版本，使用其他系统安装这个可能会出现兼容性问题
 
 将仓库内 `zshrc.sh` 文件复制所有的内容
 
@@ -38,6 +38,18 @@
 
 *参考资料：[Oh My Zsh Customization - Overriding and adding plugins](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization#overriding-and-adding-plugins)*
 
+## Windows 用户安装方法
+1. 安装Powershell7
+安装教程：https://learn.microsoft.com/zh-cn/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.5
+2. 打开powershell7并安装fastfetch
+ ``` winget install fastfetch 
+ ```
+3. 下载本项目并解压
+Code-Download ZIP
+4. 将powershell7切换到解压目录并运行
+ ``` cd [解压目录]
+.\index2.ps1
+ ```
 # TODO list
 
 - 增加对 Linux 的兼容
