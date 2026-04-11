@@ -37,9 +37,9 @@ get_color() {
 
 HOST_NAME="$(hostname)"
 ARCH=$(uname -m)
-MODEL_NAME=$(system_profiler SPHardwareDataType | awk -F": " '/Model Name/{print $2}')
-CHIP=$(system_profiler SPHardwareDataType | awk -F": " '/Chip:/{print $2}' )
-[[ -z "$CHIP" ]] && CHIP=$(system_profiler SPHardwareDataType | awk -F": " '/Processor Name:/{print $2}')
+MODEL_NAME=$(system_profiler SPHardwareDataType &>/dev/null | awk -F": " '/Model Name/{print $2}')
+CHIP=$(system_profiler SPHardwareDataType &>/dev/null | awk -F": " '/Chip:/{print $2}' )
+[[ -z "$CHIP" ]] && CHIP=$(system_profiler SPHardwareDataType &>/dev/null | awk -F": " '/Processor Name:/{print $2}')
 IP_ADDR=$(ipconfig getifaddr en0 2>/dev/null)
 [[ -z "$IP_ADDR" ]] && IP_ADDR=$(ipconfig getifaddr en1 2>/dev/null)
 [[ -z "$IP_ADDR" ]] && IP_ADDR="N/A"
@@ -237,6 +237,30 @@ fi
 
 echo ""
 
+INTEL_ONLY_GPU_PERCENT=0
+INTEL_ONLY_GPU_NAME=""
+INTEL_ONLY_GPU_VRAM_TOTAL=0
+INTEL_ONLY_GPU_VRAM_USED=0
+
+if [[ "$ARCH" == "x86_64" ]]; then
+    INTEL_ONLY_GPU_NAME=$(system_profiler SPDisplaysDataType | awk -F": " '/Chipset Model/ {print $2}' | head -n1)
+    VRAM_RAW=$(system_profiler SPDisplaysDataType | awk -F": " '/VRAM \(Total\)/ {print $2}' | head -n1)
+    if [[ "$VRAM_RAW" == *GB ]]; then
+        INTEL_ONLY_GPU_VRAM_TOTAL=$(awk "BEGIN {printf \"%d\", ${VRAM_RAW%GB}*1024}")
+    elif [[ "$VRAM_RAW" == *MB ]]; then
+        INTEL_ONLY_GPU_VRAM_TOTAL=${VRAM_RAW%MB}
+    fi
+
+    if command -v ioreg >/dev/null 2>&1; then
+        INTEL_ONLY_GPU_VRAM_USED=$(ioreg -lw0 | awk '/VRAM,totalsize/ {print $5}' | head -n1)
+        INTEL_ONLY_GPU_VRAM_USED=$((INTEL_ONLY_GPU_VRAM_USED / 1024 / 1024))
+    fi
+
+    if (( INTEL_ONLY_GPU_VRAM_TOTAL > 0 )); then
+        INTEL_ONLY_GPU_PERCENT=$(( INTEL_ONLY_GPU_VRAM_USED * 100 / INTEL_ONLY_GPU_VRAM_TOTAL ))
+    fi
+fi
+
 draw_bar() {
   local percent=$1
   local width=20
@@ -312,8 +336,13 @@ INFO_LINES+=("$(echo -e "${CYAN}Memory Pressure: ${MEM_COLOR}${MEM_BAR} ${MEM_PR
 if (( SWAP_TOTAL > 0 && SWAP_USED > 0 )); then
   SWAP_BAR=$(draw_bar $SWAP_PERCENT)
   SWAP_COLOR=$(get_color $SWAP_PERCENT)
-
   INFO_LINES+=("$(echo -e "${CYAN}Swap Usage: ${SWAP_COLOR}${SWAP_BAR} ${SWAP_PERCENT}% (${SWAP_USED}/${SWAP_TOTAL} MB)${RESET}")")
+fi
+
+if (( INTEL_ONLY_GPU_PERCENT > 0 )); then
+    GPU_BAR=$(draw_bar $INTEL_ONLY_GPU_PERCENT)
+    GPU_COLOR=$(get_color $INTEL_ONLY_GPU_PERCENT)
+    INFO_LINES+=("$(echo -e "${CYAN}GPU Usage: ${GPU_COLOR}${GPU_BAR} $GPU_PERCENT% (${GPU_VRAM_USED}/${GPU_VRAM_TOTAL} MB)${RESET}")")
 fi
 
 for ((i=0; i<${#ART[@]}; i++)); do
