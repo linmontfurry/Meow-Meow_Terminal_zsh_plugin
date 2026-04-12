@@ -1,7 +1,15 @@
 # Meow-Meow_Terminal_zsh_plugin
-✨ 可爱，简洁的minifetch+终端开篇文本方案
+✨ 可爱，简洁，强大的minifetch+终端文本方案
 
-# 使用方法
+让你的终端更加可爱酷炫
+
+## 美化效果展示
+
+![alt text](.picture/image.png)
+
+（其他展示效果请前往GitHub Workflows查看各个系统的工作状态）
+
+## 使用方法
 
 目前所有脚本支持大部分主流 Linux (特殊BusyBox或者Alpine Linux可能出现兼容问题) Mac OS 系列和 Microsoft Windows Powershell7以上的操作系统
 
@@ -17,7 +25,7 @@ Linux或者MacOS系统，请确保你的系统安装了 `zsh` 并且设置为默
 
 粘贴仓库内的对应系统的脚本文件内容，放入用户目录下的 `.zshrc` 文件，重启终端即可安装完成
 
-## Oh My Zsh 用户安装方法
+### Oh My Zsh 用户安装方法
 
 如果你已经安装了 Oh My Zsh，你可以按照以下步骤作为自定义插件安装：
 
@@ -44,7 +52,7 @@ Linux或者MacOS系统，请确保你的系统安装了 `zsh` 并且设置为默
 
 *参考资料：[Oh My Zsh Customization - Overriding and adding plugins](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization#overriding-and-adding-plugins)*
 
-## Windows 用户安装方法
+### Windows 用户安装方法
 1. 安装Powershell7
 
 安装教程：https://learn.microsoft.com/zh-cn/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.5
@@ -61,7 +69,7 @@ Code-Download ZIP
 .\index2.ps1
  ```
 
-# TODO list
+## TODO list
 
 - 让最小化实现的 minifetch 更强大
 - 准备多系统类型的 ASCII 图标
