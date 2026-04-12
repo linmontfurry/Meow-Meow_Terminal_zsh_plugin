@@ -1,0 +1,40 @@
+name: Test Meow Terminal Script on Linux
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  linux-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Update apt
+        shell: bash
+        run: |
+          sudo apt update
+
+      - name: Install fastfetch
+        shell: bash
+        run: |
+          sudo apt update
+          sudo apt install -y wget
+          wget https://github.com/fastfetch-cli/fastfetch/releases/latest/download/fastfetch-linux-amd64.deb
+          sudo dpkg -i fastfetch-linux-amd64.deb || sudo apt -f install -y
+
+      - name: Install zsh
+        shell: bash
+        run: |
+          sudo apt install -y zsh
+
+      - name: Run Meow Terminal script in proper zsh
+        shell: bash
+        run: |
+          chmod +x ./zshrclinux.sh
+          zsh ./zshrclinux.sh > output.txt
+          cat output.txt

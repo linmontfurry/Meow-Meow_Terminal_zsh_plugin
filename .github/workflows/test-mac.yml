@@ -1,4 +1,4 @@
-name: Test Meow Terminal Script
+name: Test Meow Terminal Script on macOS
 
 on:
   push:
@@ -13,25 +13,24 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Install Homebrew (if not installed)
-        shell: zsh
+      - name: Install Homebrew
+        shell: bash
         run: |
-          if ! command -v brew &>/dev/null; then
+          if ! command -v brew >/dev/null; then
             /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
           fi
 
       - name: Install fastfetch
-        shell: zsh
-        run: |
-          brew install fastfetch
+        shell: bash
+        run: brew install fastfetch
+        
+      - name: Install zsh
+        shell: bash
+        run: brew install zsh
 
-      - name: Make script executable
-        shell: zsh
+      - name: Run Meow Terminal script in proper zsh
+        shell: bash
         run: |
-          chmod +x ./zshrc.sh
-
-      - name: Run Meow Terminal script
-        shell: zsh
-        run: |
-          ./zshrc.sh > output.txt
+          chmod +x ./zshrcmac.sh
+          zsh ./zshrcmac.sh > output.txt
           cat output.txt
