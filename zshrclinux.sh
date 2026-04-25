@@ -1,5 +1,3 @@
-#!/usr/bin/env zsh
-
 emulate -LR zsh
 setopt pipefail
 
@@ -99,6 +97,7 @@ read_cpu_usage() {
     return
   fi
 
+
   usage=$(( (100 * (total_delta - idle_delta)) / total_delta ))
   (( usage < 0 )) && usage=0
   (( usage > 100 )) && usage=100
@@ -185,6 +184,9 @@ probe_gpu_utils() {
 }
 
 HOST_NAME="$(hostname 2>/dev/null)"
+[[ -z "$HOST_NAME" ]] && HOST_NAME="$(cat /etc/hostname 2>/dev/null | tr -d '\n')"
+[[ -z "$HOST_NAME" ]] && HOST_NAME="$(hostnamectl --static 2>/dev/null)"
+[[ -z "$HOST_NAME" ]] && HOST_NAME="$(uname -n 2>/dev/null)"
 [[ -n "$HOST_NAME" ]] || HOST_NAME="unknown-host"
 
 ARCH="$(uname -m 2>/dev/null)"
@@ -344,6 +346,32 @@ else
   cecho "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}, noted!${RESET}"
 fi
 
+CONNECTION_TYPE=""
+LOGIN_IP=""
+
+if [[ -n "$SSH_CONNECTION" || -n "$SSH_CLIENT" || -n "$SSH_TTY" ]]; then
+  CONNECTION_TYPE="SSH"
+  LOGIN_IP="$(echo "$SSH_CONNECTION" | awk '{print $1}')"
+  [[ -z "$LOGIN_IP" ]] && LOGIN_IP="$(echo "$SSH_CLIENT" | awk '{print $1}')"
+elif [[ "$(ps -o comm= -p $PPID 2>/dev/null)" =~ (telnet|rlogin) ]]; then
+  CONNECTION_TYPE="telnet"
+  LOGIN_IP="$(who am i 2>/dev/null | awk '{print $NF}' | tr -d '()')"
+  [[ -z "$LOGIN_IP" ]] && LOGIN_IP="$(netstat -tn 2>/dev/null | awk '/ESTABLISHED/ && /:23 / {gsub(/:[0-9]+$/, "", $5); print $5; exit}')"
+  [[ -z "$LOGIN_IP" ]] && LOGIN_IP="$(ss -tn 2>/dev/null | awk '/ESTAB/ && /:23 / {gsub(/:[0-9]+$/, "", $5); print $5; exit}')"
+fi
+
+if [[ -n "$CONNECTION_TYPE" ]]; then
+  if [[ -n "$LOGIN_IP" ]]; then
+    cecho "${CYAN}Cat noticed: you connected via ${MAGENTA}${CONNECTION_TYPE}${CYAN} from ${YELLOW}${LOGIN_IP}${CYAN}, is this you?${RESET}"
+  else
+    cecho "${CYAN}Cat noticed: you connected via ${MAGENTA}${CONNECTION_TYPE}${CYAN} from ${YELLOW}somewhere mysterious${CYAN}...${RESET}"
+  fi
+else
+  TTY_INFO="$(tty 2>/dev/null)"
+  [[ -n "$TTY_INFO" ]] && TTY_INFO="${YELLOW}${TTY_INFO}${RESET}" || TTY_INFO="${YELLOW}unknown${RESET}"
+  cecho "${CYAN}Cat noticed: you're on local terminal ${TTY_INFO}${RESET}"
+fi
+
 cecho "${CYAN}Cat sniffed the machine: hostname ${YELLOW}${HOST_NAME}${RESET}"
 cecho "${CYAN}Cat checked your primary IP: ${YELLOW}${IP_ADDR}${RESET}"
 cecho "${CYAN}Cat checked the uptime: ${YELLOW}${UP_TIME}${RESET}"
@@ -374,18 +402,40 @@ CPU_COLOR="$(get_color "$CPU_USAGE")"
 RAM_COLOR="$(get_color "$RAM_PERCENT")"
 DISK_COLOR="$(get_color "$DISK_PERCENT")"
 
-RAW_ART=(
-"               ..               "
-"      ;........,,........;      "
-"      x................::l      "
-"      x..................K      "
-"      0..................0      "
-"      K..................0      "
-"      N..................O      "
-"      0..................O      "
-"    'oxxxxxdddbbdbdddxxxxxl'    "
+CAT_ART_1=(
+"        I'm hungry!             "
+"               ノ               "
+"    ／l、 _․                    "
+"   /  l._/. フ                   "
+"  ( ﾟ⩊ ｡  . ).                  "
+"   l     ~ヽ                    "
+"    l      -.\   /)             "
+"    じしf_  , .)ノ/              "
+"                                "
 "                                "
 )
+
+CAT_ART_2=(
+"        touch me!               "
+"               ノ               "
+"    ／l、 _․                    "
+"   /  l._/. フ                  "
+"  (.˃ ᵕ ˂. ).                  "
+"   l     ~ヽ                    "
+"    l      -.\   /)             "
+"    じしf_  , .)ノ/              "
+"                                "
+"                                "
+)
+
+typeset -a ALL_CAT_ARTS
+ALL_CAT_ARTS=(CAT_ART_1 CAT_ART_2)
+
+RANDOM_INDEX=$(( (RANDOM % ${#ALL_CAT_ARTS[@]}) + 1 ))
+SELECTED_CAT_NAME="${ALL_CAT_ARTS[$RANDOM_INDEX]}"
+
+typeset -a RAW_ART
+eval "RAW_ART=(\"\${${SELECTED_CAT_NAME}[@]}\")"
 
 typeset -a DEVICE_ART INFO_LINES
 integer art_index=0
@@ -395,7 +445,9 @@ for line in "${RAW_ART[@]}"; do
   (( art_index++ ))
 done
 
-INFO_LINES+=("${BLUE}${MODEL_NAME} (${CHIP}/${ARCH})${RESET} ${DIM}-${RESET} ${LIGHT_GREEN}${USER}${RESET}@${LIGHT_GREEN}${HOST_NAME}${RESET}")
+INFO_LINES+=("${BLUE}${MODEL_NAME}${RESET}")
+INFO_LINES+=("${DIM}CPU:${RESET} ${YELLOW}${CHIP}${RESET} ${DIM}(${ARCH})${RESET}")
+INFO_LINES+=("${DIM}User:${RESET} ${LIGHT_GREEN}${USER}${RESET}@${LIGHT_GREEN}${HOST_NAME}${RESET}")
 INFO_LINES+=("${DIM}========================================${RESET}")
 INFO_LINES+=("${CYAN}CPU Usage: ${CPU_COLOR}${CPU_BAR} ${CPU_USAGE}%${RESET}")
 INFO_LINES+=("${CYAN}RAM Usage: ${RAM_COLOR}${RAM_BAR} ${RAM_PERCENT}% (${VM_USED}/${VM_TOTAL} MB)${RESET}")
@@ -421,9 +473,40 @@ elif (( ${#GPU_UTILS[@]} > 1 )); then
   done
 fi
 
-integer row_index
+get_display_width() {
+  local str="$1"
+  local stripped="$(printf '%b' "$str" | sed 's/\x1b\[[0-9;]*m//g')"
+  local width=0
+  local i char byte_val
+
+  for (( i = 0; i < ${#stripped}; i++ )); do
+    char="${stripped:$i:1}"
+    printf -v byte_val '%d' "'$char"
+
+    if (( byte_val >= 0x3000 && byte_val <= 0x9FFF )) || \
+       (( byte_val >= 0xFF00 && byte_val <= 0xFFEF )) || \
+       (( byte_val >= 0x1100 && byte_val <= 0x11FF )) || \
+       (( byte_val >= 0x2E80 && byte_val <= 0x2FFF )) || \
+       (( byte_val >= 0xAC00 && byte_val <= 0xD7AF )) || \
+       (( byte_val >= 0xF900 && byte_val <= 0xFAFF )); then
+      (( width += 2 ))
+    else
+      (( width += 1 ))
+    fi
+  done
+
+  printf '%d' "$width"
+}
+
+integer row_index target_width=35
 for (( row_index = 1; row_index <= ${#DEVICE_ART[@]}; row_index++ )); do
-  printf '%-35b %b\n' "${DEVICE_ART[$row_index]}" "${INFO_LINES[$row_index]:-}"
+  local left="${DEVICE_ART[$row_index]}"
+  local right="${INFO_LINES[$row_index]:-}"
+  local display_width=$(get_display_width "$left")
+  local padding=$(( target_width - display_width ))
+  (( padding < 0 )) && padding=0
+
+  printf '%b%*s %b\n' "$left" "$padding" "" "$right"
 done
 
 cecho ""

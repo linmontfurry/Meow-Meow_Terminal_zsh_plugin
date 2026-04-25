@@ -413,6 +413,42 @@ if ($env:USERNAME -eq 'Administrator') {
     Write-MeowLine "${CYAN}Cat whispers: your username is ${userName}${CYAN}, noted!${RESET}"
 }
 
+$connectionType = $null
+$loginIP = $null
+
+if ($env:SSH_CONNECTION -or $env:SSH_CLIENT -or $env:SSH_TTY) {
+    $connectionType = "SSH"
+    $sshInfo = if ($env:SSH_CONNECTION) { $env:SSH_CONNECTION } else { $env:SSH_CLIENT }
+    $loginIP = ($sshInfo -split '\s+')[0]
+} elseif ($env:TERM -match 'screen|tmux' -and (Get-Process -Id $PID).Parent.ProcessName -match 'telnet|rlogin') {
+    $connectionType = "telnet"
+    try {
+        $netstat = netstat -an | Select-String "ESTABLISHED" | Select-String ":23\s"
+        if ($netstat) {
+            $loginIP = ($netstat -split '\s+')[2] -replace ':.*$', ''
+        }
+    } catch {
+    }
+}
+
+if ($connectionType) {
+    if ($loginIP) {
+        Write-MeowLine "${CYAN}Cat noticed: you connected via ${MAGENTA}${connectionType}${CYAN} from ${YELLOW}${loginIP}${CYAN}, is this you?${RESET}"
+    } else {
+        Write-MeowLine "${CYAN}Cat noticed: you connected via ${MAGENTA}${connectionType}${CYAN} from ${YELLOW}somewhere mysterious${CYAN}...${RESET}"
+    }
+} else {
+    $ttyInfo = "Console"
+    try {
+        $sessionInfo = Get-CimInstance Win32_LogonSession -Filter "LogonId='$((Get-Process -Id $PID).SessionId)'" -ErrorAction SilentlyContinue
+        if ($sessionInfo) {
+            $ttyInfo = "Console (Session $($sessionInfo.LogonId))"
+        }
+    } catch {
+    }
+    Write-MeowLine "${CYAN}Cat noticed: you're on local terminal ${YELLOW}${ttyInfo}${RESET}"
+}
+
 Write-MeowLine "${CYAN}Cat sniffed the machine: hostname ${YELLOW}${hostName}${RESET}"
 Write-MeowLine "${CYAN}Cat checked your primary IP: ${YELLOW}${ipAddr}${RESET}"
 Write-MeowLine "${CYAN}Cat checked the uptime: ${YELLOW}${uptime}${RESET}"
@@ -441,18 +477,34 @@ $ramBar = Draw-Bar $memory.Percent
 $cpuColor = Get-Color $cpuUsage
 $ramColor = Get-Color $memory.Percent
 
-$rawArt = @(
-    '               ..               ',
-    '      ;........,,........;      ',
-    '      x................::l      ',
-    '      x..................K      ',
-    '      0..................0      ',
-    '      K..................0      ',
-    '      N..................O      ',
-    '      0..................O      ',
-    "    'oxxxxxdddbbdbdddxxxxxl'    ",
+$catArt1 = @(
+    '        I''m hungry!             ',
+    '               ノ               ',
+    '    ／l、 _․                    ',
+    '   /  l._/. フ                   ',
+    '  ( ﾟ⩊ ｡  . ).                  ',
+    '   l     ~ヽ                    ',
+    '    l      -.\   /)             ',
+    '    じしf_  , .)ノ/              ',
+    '                                ',
     '                                '
 )
+
+$catArt2 = @(
+    '        touch me!               ',
+    '               ノ               ',
+    '    ／l、 _․                    ',
+    '   /  l._/. フ                  ',
+    '  ( ˃ ᵕ ˂. ).                  ',
+    '   l     ~ヽ                    ',
+    '    l      -.\   /)             ',
+    '    じしf_  , .)ノ/              ',
+    '                                ',
+    '                                '
+)
+
+$allCatArts = @($catArt1, $catArt2)
+$rawArt = Get-Random -InputObject $allCatArts
 
 $deviceArt = @()
 for ($i = 0; $i -lt $rawArt.Count; $i++) {
@@ -460,7 +512,9 @@ for ($i = 0; $i -lt $rawArt.Count; $i++) {
 }
 
 $infoLines = @()
-$infoLines += "${BLUE}${modelName} (${chip}/${arch})${RESET} ${DIM}-${RESET} ${LIGHT_GREEN}$($env:USERNAME)${RESET}@${LIGHT_GREEN}${hostName}${RESET}"
+$infoLines += "${BLUE}${modelName}${RESET}"
+$infoLines += "${DIM}CPU:${RESET} ${YELLOW}${chip}${RESET} ${DIM}(${arch})${RESET}"
+$infoLines += "${DIM}User:${RESET} ${LIGHT_GREEN}$($env:USERNAME)${RESET}@${LIGHT_GREEN}${hostName}${RESET}"
 $infoLines += "${DIM}========================================${RESET}"
 $infoLines += "${CYAN}CPU Usage: ${cpuColor}${cpuBar} ${cpuUsage}%${RESET}"
 $infoLines += "${CYAN}RAM Usage: $(Get-Color $memory.Percent)${ramBar} $($memory.Percent)% ($($memory.UsedMB)/$($memory.TotalMB) MB)${RESET}"
@@ -496,10 +550,38 @@ foreach ($disk in $disks) {
     $infoLines += "${CYAN}Disk $($disk.Name): ${diskColor}${diskBar} $($disk.Percent)% ($($disk.UsedMB)/$($disk.TotalMB) MB)${RESET}"
 }
 
+function Get-DisplayWidth {
+    param([string]$Text)
+
+    $stripped = $Text -replace '\x1b\[[0-9;]*m', ''
+    $width = 0
+
+    for ($i = 0; $i -lt $stripped.Length; $i++) {
+        $char = $stripped[$i]
+        $codePoint = [int][char]$char
+
+        if (($codePoint -ge 0x3000 -and $codePoint -le 0x9FFF) -or
+            ($codePoint -ge 0xFF00 -and $codePoint -le 0xFFEF) -or
+            ($codePoint -ge 0x1100 -and $codePoint -le 0x11FF) -or
+            ($codePoint -ge 0x2E80 -and $codePoint -le 0x2FFF) -or
+            ($codePoint -ge 0xAC00 -and $codePoint -le 0xD7AF) -or
+            ($codePoint -ge 0xF900 -and $codePoint -le 0xFAFF)) {
+            $width += 2
+        } else {
+            $width += 1
+        }
+    }
+
+    return $width
+}
+
+$targetWidth = 35
 for ($i = 0; $i -lt $deviceArt.Count; $i++) {
     $left = $deviceArt[$i]
     $right = if ($i -lt $infoLines.Count) { $infoLines[$i] } else { '' }
-    Write-Host ("{0,-35} {1}" -f $left, $right)
+    $displayWidth = Get-DisplayWidth $left
+    $padding = [math]::Max(0, $targetWidth - $displayWidth)
+    Write-Host ("{0}{1} {2}" -f $left, (' ' * $padding), $right)
 }
 
 Write-MeowLine ''
