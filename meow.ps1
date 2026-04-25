@@ -29,7 +29,7 @@ function Get-Color {
 function Draw-Bar {
     param([int]$Percent = 0)
 
-    $width = 24
+    $width = 18
     if ($Percent -gt 100) { $Percent = 100 }
     if ($Percent -lt 0) { $Percent = 0 }
 
@@ -579,84 +579,13 @@ function Get-DisplayWidth {
     return $width
 }
 
-function Truncate-Line {
-    param(
-        [string]$Text,
-        [int]$MaxWidth
-    )
-
-    $result = ''
-    $currentWidth = 0
-    $inEscape = $false
-
-    for ($i = 0; $i -lt $Text.Length; $i++) {
-        $char = $Text[$i]
-
-        if ($char -eq [char]0x1B) {
-            $inEscape = $true
-            $result += $char
-            continue
-        }
-
-        if ($inEscape) {
-            $result += $char
-            if ($char -eq 'm') {
-                $inEscape = $false
-            }
-            continue
-        }
-
-        $codePoint = [int][char]$char
-        $charWidth = 10
-
-        if (($codePoint -ge 0x1100 -and $codePoint -le 0x115F) -or
-            ($codePoint -ge 0x2329 -and $codePoint -le 0x232A) -or
-            ($codePoint -ge 0x2E80 -and $codePoint -le 0x303E) -or
-            ($codePoint -ge 0x3040 -and $codePoint -le 0xA4CF) -or
-            ($codePoint -ge 0xAC00 -and $codePoint -le 0xD7A3) -or
-            ($codePoint -ge 0xF900 -and $codePoint -le 0xFAFF) -or
-            ($codePoint -ge 0xFE10 -and $codePoint -le 0xFE19) -or
-            ($codePoint -ge 0xFE30 -and $codePoint -le 0xFE6F) -or
-            ($codePoint -ge 0xFF00 -and $codePoint -le 0xFF60) -or
-            ($codePoint -ge 0xFFE0 -and $codePoint -le 0xFFE6)) {
-            $charWidth = 2
-        }
-
-        if ($currentWidth + $charWidth -gt $MaxWidth) {
-            break
-        }
-
-        $result += $char
-        $currentWidth += $charWidth
-    }
-
-    return $result
-}
-
-$termCols = try { $Host.UI.RawUI.WindowSize.Width } catch { 80 }
-if (-not $termCols -or $termCols -le 0) { $termCols = 80 }
-
-$artWidth = 0
-foreach ($line in $deviceArt) {
-    $w = Get-DisplayWidth $line
-    if ($w -gt $artWidth) { $artWidth = $w }
-}
-
-$targetWidth = $artWidth
-$maxInfoWidth = $termCols - $artWidth - 2
-if ($maxInfoWidth -lt 40) { $maxInfoWidth = 40 }
-
+$targetWidth = 1
 for ($i = 0; $i -lt $deviceArt.Count; $i++) {
     $left = $deviceArt[$i]
     $right = if ($i -lt $infoLines.Count) { $infoLines[$i] } else { '' }
-
-    if ($right) {
-        $right = Truncate-Line -Text $right -MaxWidth $maxInfoWidth
-    }
-
     $displayWidth = Get-DisplayWidth $left
     $padding = [math]::Max(0, $targetWidth - $displayWidth)
-    Write-Host ("{0}{1}  {2}" -f $left, (' ' * $padding), $right)
+    Write-Host ("{0}{1} {2}" -f $left, (' ' * $padding), $right)
 }
 
 Write-MeowLine ''

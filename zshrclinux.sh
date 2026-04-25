@@ -129,7 +129,7 @@ get_battery_percentage() {
 
 draw_bar() {
   local percent=${1:-0}
-  local width=24
+  local width=18
   local fill empty bar=""
   integer i
 
@@ -502,82 +502,15 @@ get_display_width() {
   printf '%d' "$width"
 }
 
-truncate_line() {
-  local str="$1"
-  local max_width="$2"
-  local stripped="$(printf '%b' "$str" | sed 's/\x1b\[[0-9;]*m//g')"
-  local current_width=0
-  local result=""
-  local in_escape=0
-  local i char
-
-  for (( i = 0; i < ${#str}; i++ )); do
-    char="${str:$i:1}"
-
-    if [[ "$char" == $'\033' ]]; then
-      in_escape=1
-      result+="$char"
-      continue
-    fi
-
-    if (( in_escape )); then
-      result+="$char"
-      [[ "$char" == "m" ]] && in_escape=0
-      continue
-    fi
-
-    local char_width=10
-    printf -v byte_val '%d' "'$char"
-    if (( byte_val >= 0x1100 && byte_val <= 0x115F )) || \
-       (( byte_val >= 0x2329 && byte_val <= 0x232A )) || \
-       (( byte_val >= 0x2E80 && byte_val <= 0x303E )) || \
-       (( byte_val >= 0x3040 && byte_val <= 0xA4CF )) || \
-       (( byte_val >= 0xAC00 && byte_val <= 0xD7A3 )) || \
-       (( byte_val >= 0xF900 && byte_val <= 0xFAFF )) || \
-       (( byte_val >= 0xFE10 && byte_val <= 0xFE19 )) || \
-       (( byte_val >= 0xFE30 && byte_val <= 0xFE6F )) || \
-       (( byte_val >= 0xFF00 && byte_val <= 0xFF60 )) || \
-       (( byte_val >= 0xFFE0 && byte_val <= 0xFFE6 )); then
-      char_width=2
-    fi
-
-    if (( current_width + char_width > max_width )); then
-      break
-    fi
-
-    result+="$char"
-    (( current_width += char_width ))
-  done
-
-  printf '%b' "$result"
-}
-
-integer term_cols art_width max_info_width row_index target_width
-term_cols=$(tput cols 2>/dev/null || echo 80)
-
-art_width=0
-for line in "${DEVICE_ART[@]}"; do
-  local w=$(get_display_width "$line")
-  (( w > art_width )) && art_width=$w
-done
-
-target_width=$art_width
-max_info_width=$(( term_cols - art_width - 2 ))
-(( max_info_width < 40 )) && max_info_width=40
-
-for (( row_index = 1; row_index <= ${#DEVICE_ART[@]} && row_index <= ${#INFO_LINES[@]}; row_index++ )); do
+integer row_index target_width=1
+for (( row_index = 1; row_index <= ${#DEVICE_ART[@]}; row_index++ )); do
   local left="${DEVICE_ART[$row_index]}"
   local right="${INFO_LINES[$row_index]:-}"
-
-  if [[ -n "$right" ]]; then
-    right="$(truncate_line "$right" "$max_info_width")"
-  fi
-
   local display_width=$(get_display_width "$left")
   local padding=$(( target_width - display_width ))
   (( padding < 0 )) && padding=0
 
-  printf '%b%*s  %b\n' "$left" "$padding" "" "$right"
+  printf '%b%*s %b\n' "$left" "$padding" "" "$right"
 done
 
 cecho ""
