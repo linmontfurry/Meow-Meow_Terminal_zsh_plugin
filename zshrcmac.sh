@@ -47,7 +47,7 @@ convert_to_mb() {
 
 draw_bar() {
   local percent=${1:-0}
-  local width=20
+  local width=18
   local fill empty bar=""
   integer i
 
@@ -475,29 +475,29 @@ DISK_COLOR="$(get_color "$DISK_PERCENT")"
 MEM_COLOR="$(get_color "$MEM_PRESSURE")"
 
 CAT_ART_1=(
-"        I'm hungry!             "
-"               ノ               "
-"    ／l、 _․                    "
-"   /  l._/. フ                   "
-"  ( ﾟ⩊ ｡  . ).                  "
-"   l     ~ヽ                    "
-"    l      -.\   /)             "
-"    じしf_  , .)ノ/              "
-"                                "
-"                                "
+"       I'm hungry!  "
+"              ノ    "
+"   ／l、 _․         "
+"  /  l._/. フ       "
+" ( ﾟ⩊ ｡  . ).       "
+"  l     ~ヽ         "
+"   l      -.\   /)  "
+"   じしf_  , .)ノ/  "
+"                    "
+"                    "
 )
 
 CAT_ART_2=(
-"        touch me!               "
-"               ノ               "
-"    ／l、 _․                    "
-"   /  l._/. フ                  "
-"  (.˃ ᵕ ˂. ).                  "
-"   l     ~ヽ                    "
-"    l      -.\   /)             "
-"    じしf_  , .)ノ/              "
-"                                "
-"                                "
+"       touch me!    "
+"              ノ    "
+"   ／l、 _․         "
+"  /  l._/. フ       "
+" (.˃ ᵕ ˂. ).        "
+"  l     ~ヽ         "
+"   l      -.\   /)  "
+"   じしf_  , .)ノ/  "
+"                    "
+"                    "
 )
 
 typeset -a ALL_CAT_ARTS
@@ -566,7 +566,7 @@ get_display_width() {
   printf '%d' "$width"
 }
 
-integer row_index target_width=35
+integer row_index target_width=1
 for (( row_index = 1; row_index <= ${#DEVICE_ART[@]}; row_index++ )); do
   local left="${DEVICE_ART[$row_index]}"
   local right="${INFO_LINES[$row_index]:-}"

@@ -29,7 +29,7 @@ function Get-Color {
 function Draw-Bar {
     param([int]$Percent = 0)
 
-    $width = 20
+    $width = 18
     if ($Percent -gt 100) { $Percent = 100 }
     if ($Percent -lt 0) { $Percent = 0 }
 
@@ -478,29 +478,29 @@ $cpuColor = Get-Color $cpuUsage
 $ramColor = Get-Color $memory.Percent
 
 $catArt1 = @(
-    '        I''m hungry!             ',
-    '               ノ               ',
-    '    ／l、 _․                    ',
-    '   /  l._/. フ                   ',
-    '  ( ﾟ⩊ ｡  . ).                  ',
-    '   l     ~ヽ                    ',
-    '    l      -.\   /)             ',
-    '    じしf_  , .)ノ/              ',
-    '                                ',
-    '                                '
+"       I'm hungry!  ",
+"              ノ    ",
+"   ／l、 _․         ",
+"  /  l._/. フ       ",
+" ( ﾟ⩊ ｡  . ).       ",
+"  l     ~ヽ         ",
+"   l      -.\   /)  ",
+"   じしf_  , .)ノ/  ",
+"                    ",
+"                    "
 )
 
 $catArt2 = @(
-    '        touch me!               ',
-    '               ノ               ',
-    '    ／l、 _․                    ',
-    '   /  l._/. フ                  ',
-    '  (.˃ ᵕ ˂. ).                  ',
-    '   l     ~ヽ                    ',
-    '    l      -.\   /)             ',
-    '    じしf_  , .)ノ/              ',
-    '                                ',
-    '                                '
+"       touch me!    ",
+"              ノ    ",
+"   ／l、 _․         ",
+"  /  l._/. フ       ",
+" (.˃ ᵕ ˂. ).        ",
+"  l     ~ヽ         ",
+"   l      -.\   /)  ",
+"   じしf_  , .)ノ/  ",
+"                    ",
+"                    "
 )
 
 $allCatArts = @($catArt1, $catArt2)
@@ -579,7 +579,7 @@ function Get-DisplayWidth {
     return $width
 }
 
-$targetWidth = 35
+$targetWidth = 1
 for ($i = 0; $i -lt $deviceArt.Count; $i++) {
     $left = $deviceArt[$i]
     $right = if ($i -lt $infoLines.Count) { $infoLines[$i] } else { '' }
