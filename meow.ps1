@@ -495,7 +495,7 @@ $catArt2 = @(
     '               ノ               ',
     '    ／l、 _․                    ',
     '   /  l._/. フ                  ',
-    '  ( ˃ ᵕ ˂. ).                  ',
+    '  (.˃ ᵕ ˂. ).                  ',
     '   l     ~ヽ                    ',
     '    l      -.\   /)             ',
     '    じしf_  , .)ノ/              ',
@@ -560,12 +560,16 @@ function Get-DisplayWidth {
         $char = $stripped[$i]
         $codePoint = [int][char]$char
 
-        if (($codePoint -ge 0x3000 -and $codePoint -le 0x9FFF) -or
-            ($codePoint -ge 0xFF00 -and $codePoint -le 0xFFEF) -or
-            ($codePoint -ge 0x1100 -and $codePoint -le 0x11FF) -or
-            ($codePoint -ge 0x2E80 -and $codePoint -le 0x2FFF) -or
-            ($codePoint -ge 0xAC00 -and $codePoint -le 0xD7AF) -or
-            ($codePoint -ge 0xF900 -and $codePoint -le 0xFAFF)) {
+        if (($codePoint -ge 0x1100 -and $codePoint -le 0x115F) -or
+            ($codePoint -ge 0x2329 -and $codePoint -le 0x232A) -or
+            ($codePoint -ge 0x2E80 -and $codePoint -le 0x303E) -or
+            ($codePoint -ge 0x3040 -and $codePoint -le 0xA4CF) -or
+            ($codePoint -ge 0xAC00 -and $codePoint -le 0xD7A3) -or
+            ($codePoint -ge 0xF900 -and $codePoint -le 0xFAFF) -or
+            ($codePoint -ge 0xFE10 -and $codePoint -le 0xFE19) -or
+            ($codePoint -ge 0xFE30 -and $codePoint -le 0xFE6F) -or
+            ($codePoint -ge 0xFF00 -and $codePoint -le 0xFF60) -or
+            ($codePoint -ge 0xFFE0 -and $codePoint -le 0xFFE6)) {
             $width += 2
         } else {
             $width += 1

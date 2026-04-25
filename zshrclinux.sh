@@ -483,12 +483,16 @@ get_display_width() {
     char="${stripped:$i:1}"
     printf -v byte_val '%d' "'$char"
 
-    if (( byte_val >= 0x3000 && byte_val <= 0x9FFF )) || \
-       (( byte_val >= 0xFF00 && byte_val <= 0xFFEF )) || \
-       (( byte_val >= 0x1100 && byte_val <= 0x11FF )) || \
-       (( byte_val >= 0x2E80 && byte_val <= 0x2FFF )) || \
-       (( byte_val >= 0xAC00 && byte_val <= 0xD7AF )) || \
-       (( byte_val >= 0xF900 && byte_val <= 0xFAFF )); then
+    if (( byte_val >= 0x1100 && byte_val <= 0x115F )) || \
+       (( byte_val >= 0x2329 && byte_val <= 0x232A )) || \
+       (( byte_val >= 0x2E80 && byte_val <= 0x303E )) || \
+       (( byte_val >= 0x3040 && byte_val <= 0xA4CF )) || \
+       (( byte_val >= 0xAC00 && byte_val <= 0xD7A3 )) || \
+       (( byte_val >= 0xF900 && byte_val <= 0xFAFF )) || \
+       (( byte_val >= 0xFE10 && byte_val <= 0xFE19 )) || \
+       (( byte_val >= 0xFE30 && byte_val <= 0xFE6F )) || \
+       (( byte_val >= 0xFF00 && byte_val <= 0xFF60 )) || \
+       (( byte_val >= 0xFFE0 && byte_val <= 0xFFE6 )); then
       (( width += 2 ))
     else
       (( width += 1 ))
