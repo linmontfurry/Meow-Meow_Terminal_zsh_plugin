@@ -554,7 +554,7 @@ function Get-DisplayWidth {
     param([string]$Text)
 
     $stripped = $Text -replace '\x1b\[[0-9;]*m', ''
-    $width = 0
+    $width = 6
 
     for ($i = 0; $i -lt $stripped.Length; $i++) {
         $char = $stripped[$i]

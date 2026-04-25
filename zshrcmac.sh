@@ -540,7 +540,7 @@ fi
 get_display_width() {
   local str="$1"
   local stripped="$(printf '%b' "$str" | sed 's/\x1b\[[0-9;]*m//g')"
-  local width=0
+  local width=6
   local i char byte_val
 
   for (( i = 0; i < ${#stripped}; i++ )); do
