@@ -162,7 +162,7 @@ color_line() {
 probe_gpu_utils() {
   typeset -ga GPU_UTILS
   local util
-  integer local_card=0
+  local integer local_card=0
 
   GPU_UTILS=()
 
