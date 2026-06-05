@@ -26,6 +26,35 @@ function Get-Color {
     return $GREEN
 }
 
+function Get-CpuCoreCount {
+    try {
+        $computer = Get-CimInstance Win32_ComputerSystem
+        if ($computer.NumberOfLogicalProcessors -gt 0) {
+            return [int]$computer.NumberOfLogicalProcessors
+        }
+    } catch {
+    }
+
+    try {
+        $cores = (Get-CimInstance Win32_Processor |
+            Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
+        if ($cores -gt 0) {
+            return [int]$cores
+        }
+    } catch {
+    }
+
+    return 1
+}
+
+function Format-CpuCoreCount {
+    param([int]$Cores = 1)
+
+    if ($Cores -lt 1) { $Cores = 1 }
+    if ($Cores -eq 1) { return '1 core' }
+    return "$Cores cores"
+}
+
 function Draw-Bar {
     param([int]$Percent = 0)
 
@@ -286,6 +315,8 @@ $ipAddr = Get-PrimaryIPv4
 $uptime = Format-Uptime $operatingSystem.LastBootUpTime
 $battery = Get-BatteryPercentage
 $cpuUsage = Get-CpuUsage
+$cpuCores = Get-CpuCoreCount
+$cpuCoreText = Format-CpuCoreCount $cpuCores
 $memory = Get-MemoryStats
 $swap = Get-SwapStats
 $disks = @(Get-DiskStats)
@@ -516,7 +547,7 @@ $infoLines += "${BLUE}${modelName}${RESET}"
 $infoLines += "${DIM}CPU:${RESET} ${YELLOW}${chip}${RESET} ${DIM}(${arch})${RESET}"
 $infoLines += "${DIM}User:${RESET} ${LIGHT_GREEN}$($env:USERNAME)${RESET}@${LIGHT_GREEN}${hostName}${RESET}"
 $infoLines += "${DIM}========================================${RESET}"
-$infoLines += "${CYAN}CPU Usage: ${cpuColor}${cpuBar} ${cpuUsage}%${RESET}"
+$infoLines += "${CYAN}CPU Usage: ${cpuColor}${cpuBar} ${cpuUsage}%(${cpuCoreText})${RESET}"
 $infoLines += "${CYAN}RAM Usage: $(Get-Color $memory.Percent)${ramBar} $($memory.Percent)% ($($memory.UsedMB)/$($memory.TotalMB) MB)${RESET}"
 
 if ($swap.TotalMB -gt 0) {

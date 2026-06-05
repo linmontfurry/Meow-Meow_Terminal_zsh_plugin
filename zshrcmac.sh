@@ -31,6 +31,27 @@ get_color() {
   fi
 }
 
+get_cpu_core_count() {
+  local cores
+
+  cores="$(sysctl -n hw.logicalcpu 2>/dev/null)"
+  [[ "$cores" == <-> && "$cores" -gt 0 ]] || cores="$(sysctl -n hw.ncpu 2>/dev/null)"
+  [[ "$cores" == <-> && "$cores" -gt 0 ]] || cores=1
+
+  printf '%s' "$cores"
+}
+
+format_cpu_core_count() {
+  local cores=${1:-1}
+
+  [[ "$cores" == <-> && "$cores" -gt 0 ]] || cores=1
+  if (( cores == 1 )); then
+    printf '1 core'
+  else
+    printf '%s cores' "$cores"
+  fi
+}
+
 convert_to_mb() {
   local val="${1:-0M}"
 
@@ -288,6 +309,8 @@ IP_ADDR="$(get_primary_ip)"
 UP_TIME="$(get_uptime)"
 BATTERY="$(get_battery_percentage)"
 CPU_USAGE="$(get_cpu_usage)"
+CPU_CORES="$(get_cpu_core_count)"
+CPU_CORE_TEXT="$(format_cpu_core_count "$CPU_CORES")"
 
 typeset -a MEMORY_STATS
 MEMORY_STATS=("${(@s: :)$(get_memory_stats)}")
@@ -521,7 +544,7 @@ INFO_LINES+=("${BLUE}${MODEL_NAME}${RESET}")
 INFO_LINES+=("${DIM}CPU:${RESET} ${YELLOW}${CHIP}${RESET} ${DIM}(${ARCH})${RESET}")
 INFO_LINES+=("${DIM}User:${RESET} ${LIGHT_GREEN}${USER}${RESET}@${LIGHT_GREEN}${HOST_NAME}${RESET}")
 INFO_LINES+=("${DIM}========================================${RESET}")
-INFO_LINES+=("${CYAN}CPU Usage: ${CPU_COLOR}${CPU_BAR} ${CPU_USAGE}%${RESET}")
+INFO_LINES+=("${CYAN}CPU Usage: ${CPU_COLOR}${CPU_BAR} ${CPU_USAGE}%(${CPU_CORE_TEXT})${RESET}")
 INFO_LINES+=("${CYAN}RAM Usage: ${RAM_COLOR}${RAM_BAR} ${RAM_PERCENT}% (${RAM_USED}/${RAM_TOTAL} MB)${RESET}")
 INFO_LINES+=("${CYAN}Disk Usage: ${DISK_COLOR}${DISK_BAR} ${DISK_PERCENT}% (${DISK_USED}/${DISK_TOTAL} MB)${RESET}")
 INFO_LINES+=("${CYAN}Memory Pressure: ${MEM_COLOR}${MEM_BAR} ${MEM_PRESSURE}%${RESET}")

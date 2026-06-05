@@ -31,6 +31,31 @@ get_color() {
   fi
 }
 
+get_cpu_core_count() {
+  local cores
+
+  if command -v nproc >/dev/null 2>&1; then
+    cores="$(nproc 2>/dev/null)"
+  fi
+
+  [[ "$cores" == <-> && "$cores" -gt 0 ]] || cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null)"
+  [[ "$cores" == <-> && "$cores" -gt 0 ]] || cores="$(awk '/^processor[[:space:]]*:/ {count++} END {print count+0}' /proc/cpuinfo 2>/dev/null)"
+  [[ "$cores" == <-> && "$cores" -gt 0 ]] || cores=1
+
+  printf '%s' "$cores"
+}
+
+format_cpu_core_count() {
+  local cores=${1:-1}
+
+  [[ "$cores" == <-> && "$cores" -gt 0 ]] || cores=1
+  if (( cores == 1 )); then
+    printf '1 core'
+  else
+    printf '%s cores' "$cores"
+  fi
+}
+
 format_uptime_from_seconds() {
   local total_seconds=${1:-0}
   local days=$(( total_seconds / 86400 ))
@@ -77,28 +102,39 @@ read_cpu_usage() {
   fi
 
   local cpu user nice system idle iowait irq softirq steal guest guest_nice
-  local total_1 total_2 idle_1 idle_2 total_delta idle_delta usage
+  local total_now idle_now total_prev idle_prev total_delta idle_delta usage
+  local cache_dir cache_file
 
   read -r cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
-  idle_1=$(( idle + iowait ))
-  total_1=$(( user + nice + system + idle + iowait + irq + softirq + steal ))
+  idle_now=$(( idle + iowait ))
+  total_now=$(( user + nice + system + idle + iowait + irq + softirq + steal ))
 
-  sleep 0.2
+  if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+    cache_dir="${XDG_CACHE_HOME}/meow-terminal"
+  elif [[ -n "${HOME:-}" ]]; then
+    cache_dir="${HOME}/.cache/meow-terminal"
+  else
+    cache_dir="/tmp/meow-terminal-${UID:-0}"
+  fi
+  cache_file="${cache_dir}/linux_cpu.stat"
 
-  read -r cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
-  idle_2=$(( idle + iowait ))
-  total_2=$(( user + nice + system + idle + iowait + irq + softirq + steal ))
-
-  total_delta=$(( total_2 - total_1 ))
-  idle_delta=$(( idle_2 - idle_1 ))
-
-  if (( total_delta <= 0 )); then
-    printf '0'
-    return
+  if [[ -r "$cache_file" ]]; then
+    read -r total_prev idle_prev < "$cache_file"
   fi
 
+  mkdir -p "$cache_dir" 2>/dev/null
+  printf '%s %s\n' "$total_now" "$idle_now" >| "$cache_file" 2>/dev/null
 
-  usage=$(( (100 * (total_delta - idle_delta)) / total_delta ))
+  if [[ "$total_prev" == <-> && "$idle_prev" == <-> && "$total_now" -gt "$total_prev" ]]; then
+    total_delta=$(( total_now - total_prev ))
+    idle_delta=$(( idle_now - idle_prev ))
+    usage=$(( (100 * (total_delta - idle_delta)) / total_delta ))
+  elif (( total_now > 0 )); then
+    usage=$(( (100 * (total_now - idle_now)) / total_now ))
+  else
+    usage=0
+  fi
+
   (( usage < 0 )) && usage=0
   (( usage > 100 )) && usage=100
   printf '%s' "$usage"
@@ -206,6 +242,8 @@ IP_ADDR="$(get_primary_ip)"
 UP_TIME="$(get_uptime)"
 BATTERY="$(get_battery_percentage)"
 CPU_USAGE="$(read_cpu_usage)"
+CPU_CORES="$(get_cpu_core_count)"
+CPU_CORE_TEXT="$(format_cpu_core_count "$CPU_CORES")"
 
 if command -v free >/dev/null 2>&1; then
   VM_TOTAL=$(free -m | awk '/Mem:/ {print $2}')
@@ -449,7 +487,7 @@ INFO_LINES+=("${BLUE}${MODEL_NAME}${RESET}")
 INFO_LINES+=("${DIM}CPU:${RESET} ${YELLOW}${CHIP}${RESET} ${DIM}(${ARCH})${RESET}")
 INFO_LINES+=("${DIM}User:${RESET} ${LIGHT_GREEN}${USER}${RESET}@${LIGHT_GREEN}${HOST_NAME}${RESET}")
 INFO_LINES+=("${DIM}========================================${RESET}")
-INFO_LINES+=("${CYAN}CPU Usage: ${CPU_COLOR}${CPU_BAR} ${CPU_USAGE}%${RESET}")
+INFO_LINES+=("${CYAN}CPU Usage: ${CPU_COLOR}${CPU_BAR} ${CPU_USAGE}%(${CPU_CORE_TEXT})${RESET}")
 INFO_LINES+=("${CYAN}RAM Usage: ${RAM_COLOR}${RAM_BAR} ${RAM_PERCENT}% (${VM_USED}/${VM_TOTAL} MB)${RESET}")
 INFO_LINES+=("${CYAN}Disk Usage: ${DISK_COLOR}${DISK_BAR} ${DISK_PERCENT}% (${DISK_USED}/${DISK_TOTAL} MB)${RESET}")
 
