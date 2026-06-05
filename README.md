@@ -19,9 +19,9 @@
 
 Linux或者MacOS系统，请确保你的系统安装了 `zsh` 并且设置为默认终端，这样即可获得更加完整的体验
 
-对于Windows系统，请确保你安装了 `Chocolatey`
+对于Windows系统，请确保你安装了 `Chocolatey` 来安装其他必要的软件，比如 `FastFetch`
 
-无论是任何系统，使用本项目前最好都要安装 fastfetch 来兼容相关参数工作
+无论是任何系统，使用本项目前最好都要安装 fastfetch 来兼容相关参数工作，当然，这是非必须的
 
 粘贴仓库内的对应系统的脚本文件内容，放入用户目录下的 `.zshrc` 文件，重启终端即可安装完成
 
@@ -52,6 +52,55 @@ Linux或者MacOS系统，请确保你的系统安装了 `zsh` 并且设置为默
 
 *参考资料：[Oh My Zsh Customization - Overriding and adding plugins](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization#overriding-and-adding-plugins)*
 
+#### 关闭部分系统的开机文本
+
+由于部分系统可能存在自带的开机文本显示，与本项目使用可能会出现显示杂乱的问题
+
+你可以参考下面的相关命令关闭系统自带的开机文本
+
+**Ubuntu / Debian / Linux Mint**
+```sh
+# 关闭动态 MOTD
+[ -d /etc/update-motd.d ] && sudo find /etc/update-motd.d -type f -exec chmod -x {} +
+
+# 关闭 Ubuntu motd-news
+[ -f /etc/default/motd-news ] && sudo sed -i 's/^ENABLED=.*/ENABLED=0/' /etc/default/motd-news
+
+# 清空静态登录文本
+sudo sh -c ': > /etc/motd'
+sudo sh -c ': > /etc/issue'
+sudo sh -c ': > /etc/issue.net'
+
+# 当前用户静音 Last login / mail / 部分 MOTD
+touch ~/.hushlogin
+
+# SSH 登录不打印系统 MOTD 和 Last login
+sudo sh -c 'grep -q "^PrintMotd" /etc/ssh/sshd_config && sed -i "s/^PrintMotd.*/PrintMotd no/" /etc/ssh/sshd_config || echo "PrintMotd no" >> /etc/ssh/sshd_config'
+sudo sh -c 'grep -q "^PrintLastLog" /etc/ssh/sshd_config && sed -i "s/^PrintLastLog.*/PrintLastLog no/" /etc/ssh/sshd_config || echo "PrintLastLog no" >> /etc/ssh/sshd_config'
+
+sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null
+```
+
+**RHEL / CentOS / Rocky / Alma / Fedora / Arch / Manjaro / Alpine 通用**
+```sh
+sudo sh -c ': > /etc/motd'
+sudo sh -c ': > /etc/issue'
+sudo sh -c ': > /etc/issue.net'
+
+touch ~/.hushlogin
+
+sudo sh -c 'grep -q "^PrintMotd" /etc/ssh/sshd_config && sed -i "s/^PrintMotd.*/PrintMotd no/" /etc/ssh/sshd_config || echo "PrintMotd no" >> /etc/ssh/sshd_config'
+sudo sh -c 'grep -q "^PrintLastLog" /etc/ssh/sshd_config && sed -i "s/^PrintLastLog.*/PrintLastLog no/" /etc/ssh/sshd_config || echo "PrintLastLog no" >> /etc/ssh/sshd_config'
+
+sudo systemctl reload sshd 2>/dev/null || sudo rc-service sshd reload 2>/dev/null || sudo service sshd reload 2>/dev/null
+```
+
+Ubuntu、Debian、Linux Mint、Pop!_OS 等 Debian 系更适合使用第一套
+
+大多数非 Debian 系 Linux，包括 RHEL 系、Fedora、Arch、Manjaro、Alpine 使用第二套是更好的选择
+
+当然，若你不太介意于显示效果。关闭系统自带开机文本的选项是非必须的。
+
 ### Windows 用户安装方法
 1. 安装Powershell7
 
@@ -72,7 +121,7 @@ Code-Download ZIP
 ## TODO list
 
 - 让最小化实现的 minifetch 更强大
-- 准备多系统类型的 ASCII 图标
+- 准备更多猫咪类型的 ASCII 图标
 - ......
 
 # 开源协议
