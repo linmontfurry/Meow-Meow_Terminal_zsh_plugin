@@ -70,7 +70,7 @@ draw_bar() {
   local percent=${1:-0}
   local width=18
   local fill empty bar=""
-  integer i
+  local -i i
 
   (( percent > 100 )) && percent=100
   (( percent < 0 )) && percent=0
@@ -277,7 +277,7 @@ get_mac_hardware_profile() {
 get_gpu_lines() {
   local display_data line
   local -a gpu_names
-  integer gpu_index=0
+  local -i gpu_index=0
 
   display_data="$(system_profiler SPDisplaysDataType 2>/dev/null)"
   while IFS= read -r line; do
@@ -544,7 +544,7 @@ INFO_LINES+=("${BLUE}${MODEL_NAME}${RESET}")
 INFO_LINES+=("${DIM}CPU:${RESET} ${YELLOW}${CHIP}${RESET} ${DIM}(${ARCH})${RESET}")
 INFO_LINES+=("${DIM}User:${RESET} ${LIGHT_GREEN}${USER}${RESET}@${LIGHT_GREEN}${HOST_NAME}${RESET}")
 INFO_LINES+=("${DIM}========================================${RESET}")
-INFO_LINES+=("${CYAN}CPU Usage: ${CPU_COLOR}${CPU_BAR} ${CPU_USAGE}%(${CPU_CORE_TEXT})${RESET}")
+INFO_LINES+=("${CYAN}CPU Usage: ${CPU_COLOR}${CPU_BAR} ${CPU_USAGE}% (${CPU_CORE_TEXT})${RESET}")
 INFO_LINES+=("${CYAN}RAM Usage: ${RAM_COLOR}${RAM_BAR} ${RAM_PERCENT}% (${RAM_USED}/${RAM_TOTAL} MB)${RESET}")
 INFO_LINES+=("${CYAN}Disk Usage: ${DISK_COLOR}${DISK_BAR} ${DISK_PERCENT}% (${DISK_USED}/${DISK_TOTAL} MB)${RESET}")
 INFO_LINES+=("${CYAN}Memory Pressure: ${MEM_COLOR}${MEM_BAR} ${MEM_PRESSURE}%${RESET}")

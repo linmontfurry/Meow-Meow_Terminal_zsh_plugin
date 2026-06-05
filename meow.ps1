@@ -547,7 +547,7 @@ $infoLines += "${BLUE}${modelName}${RESET}"
 $infoLines += "${DIM}CPU:${RESET} ${YELLOW}${chip}${RESET} ${DIM}(${arch})${RESET}"
 $infoLines += "${DIM}User:${RESET} ${LIGHT_GREEN}$($env:USERNAME)${RESET}@${LIGHT_GREEN}${hostName}${RESET}"
 $infoLines += "${DIM}========================================${RESET}"
-$infoLines += "${CYAN}CPU Usage: ${cpuColor}${cpuBar} ${cpuUsage}%(${cpuCoreText})${RESET}"
+$infoLines += "${CYAN}CPU Usage: ${cpuColor}${cpuBar} ${cpuUsage}% (${cpuCoreText})${RESET}"
 $infoLines += "${CYAN}RAM Usage: $(Get-Color $memory.Percent)${ramBar} $($memory.Percent)% ($($memory.UsedMB)/$($memory.TotalMB) MB)${RESET}"
 
 if ($swap.TotalMB -gt 0) {
