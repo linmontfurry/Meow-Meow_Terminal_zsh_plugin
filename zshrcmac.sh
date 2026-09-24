@@ -130,6 +130,25 @@ meow_cached() {
   return 0
 }
 
+# Hardware only changes across a power cycle, so everything cached belongs to
+# the boot it was measured in. A new boot starts from an empty cache: a swapped
+# CPU, GPU or memory shows up in the first shell after the machine comes back,
+# instead of up to MEOW_STATIC_TTL later.
+#
+# $1 is an opaque boot id, or the boot time in epoch seconds. The kernel moves
+# the boot time whenever the clock is stepped (NTP after a wake from sleep, a
+# manual change), so boot times under a minute apart are the same boot. No
+# power cycle long enough to swap a part is that short.
+meow_cache_bind_boot() {
+  [[ -n "$1" && "$1" != 0 ]] || return 0
+  if meow_cache_get boot -1; then
+    [[ "$REPLY" == "$1" ]] && return 0
+    [[ "$REPLY" == <-> && "$1" == <-> ]] && (( REPLY - $1 < 60 && $1 - REPLY < 60 )) && return 0
+  fi
+  MEOW_CACHE=()
+  meow_cache_set boot "$1"
+}
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 #
@@ -575,6 +594,7 @@ meow_parent_comm() {
 
 meow_cache_load
 meow_sysctl_batch
+meow_cache_bind_boot "$MEOW_SYS_BOOTSEC"
 
 meow_hostname;   HOST_NAME="$REPLY"
 
@@ -602,7 +622,7 @@ fi
 [[ -n "$MODEL_NAME" ]] || MODEL_NAME="Mac"
 [[ -n "$CHIP" ]] || CHIP="Unknown CPU"
 
-meow_cached cpu_cores $MEOW_STATIC_TTL meow_cpu_cores
+meow_cpu_cores
 CPU_CORES="$REPLY"
 [[ "$CPU_CORES" == <-> ]] || CPU_CORES=1
 meow_format_cores "$CPU_CORES"; CPU_CORE_TEXT="$REPLY"

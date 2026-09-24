@@ -127,6 +127,25 @@ meow_cached() {
   return 0
 }
 
+# Hardware only changes across a power cycle, so everything cached belongs to
+# the boot it was measured in. A new boot starts from an empty cache: a swapped
+# CPU, GPU or memory shows up in the first shell after the machine comes back,
+# instead of up to MEOW_STATIC_TTL later.
+#
+# $1 is an opaque boot id, or the boot time in epoch seconds. The kernel moves
+# the boot time whenever the clock is stepped (NTP after a wake from sleep, a
+# manual change), so boot times under a minute apart are the same boot. No
+# power cycle long enough to swap a part is that short.
+meow_cache_bind_boot() {
+  [[ -n "$1" && "$1" != 0 ]] || return 0
+  if meow_cache_get boot -1; then
+    [[ "$REPLY" == "$1" ]] && return 0
+    [[ "$REPLY" == <-> && "$1" == <-> ]] && (( REPLY - $1 < 60 && $1 - REPLY < 60 )) && return 0
+  fi
+  MEOW_CACHE=()
+  meow_cache_set boot "$1"
+}
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 #
@@ -243,6 +262,20 @@ meow_arch() {
   [[ -n "$REPLY" ]] || REPLY="unknown-arch"
 }
 
+# A value unique to this boot. boot_id changes on every boot and is read
+# straight from the kernel; the boot time is the fallback for kernels without
+# it.
+meow_boot_id() {
+  local key value
+  REPLY=""
+  [[ -r /proc/sys/kernel/random/boot_id ]] && REPLY="$(</proc/sys/kernel/random/boot_id)"
+  if [[ -z "$REPLY" && -r /proc/stat ]]; then
+    while read -r key value; do
+      [[ "$key" == btime ]] && { REPLY="${value%% *}"; break; }
+    done < /proc/stat
+  fi
+}
+
 meow_hostname() {
   REPLY="${HOST:-}"
   [[ -n "$REPLY" ]] || { [[ -r /proc/sys/kernel/hostname ]] && REPLY="$(</proc/sys/kernel/hostname)" }
@@ -301,8 +334,11 @@ meow_cpu_model() {
 meow_cpu_cores() {
   local raw part lo hi
   local -i total=0
-  if [[ -r /sys/devices/system/cpu/present ]]; then
-    raw="$(</sys/devices/system/cpu/present)"
+  # "online", not "present": present also lists CPUs that are switched off
+  # (hot-unplugged cores, idle big.LITTLE clusters, spare vCPUs), which neither
+  # run anything nor appear in the /proc/stat totals the usage is taken from.
+  if [[ -r /sys/devices/system/cpu/online ]]; then
+    raw="$(</sys/devices/system/cpu/online)"
     raw="${raw//[[:space:]]/}"
     for part in ${(s:,:)raw}; do
       if [[ "$part" == *-* ]]; then
@@ -530,6 +566,7 @@ meow_parent_comm() {
 # ---------------------------------------------------------------------------
 
 meow_cache_load
+meow_boot_id; meow_cache_bind_boot "$REPLY"
 
 meow_hostname;   HOST_NAME="$REPLY"
 
@@ -542,7 +579,7 @@ meow_cached cpu_model $MEOW_STATIC_TTL meow_cpu_model
 CHIP="$REPLY"
 [[ -n "$CHIP" ]] || CHIP="Unknown CPU"
 
-meow_cached cpu_cores $MEOW_STATIC_TTL meow_cpu_cores
+meow_cpu_cores
 CPU_CORES="$REPLY"
 [[ "$CPU_CORES" == <-> ]] || CPU_CORES=1
 meow_format_cores "$CPU_CORES"; CPU_CORE_TEXT="$REPLY"
