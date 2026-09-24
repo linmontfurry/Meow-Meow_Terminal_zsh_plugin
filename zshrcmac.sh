@@ -98,16 +98,63 @@ color_line() {
   printf '\033[%sm%s\033[0m' "$color" "$line"
 }
 
+# macOS ships no timeout(1), so nothing here has an upper bound on how long it
+# may block. Run a command with a hard wall-clock limit instead: the output goes
+# to a file rather than a pipe, so a stalled lookup can never hold up startup
+# even if the command left a child of its own behind.
+run_with_timeout() {
+  emulate -L zsh
+  setopt no_monitor no_notify
+
+  local limit="${1:-1}"
+  shift
+
+  local out_file="${TMPDIR:-/tmp}/meow-meow-$$-${RANDOM}"
+  local cmd_pid watchdog_pid
+  local -i ret=0
+
+  "$@" >"$out_file" 2>/dev/null &
+  cmd_pid=$!
+
+  ( sleep "$limit"; kill -KILL "$cmd_pid" ) >/dev/null 2>&1 &
+  watchdog_pid=$!
+
+  wait "$cmd_pid" 2>/dev/null || ret=$?
+  kill -KILL "$watchdog_pid" 2>/dev/null
+  wait "$watchdog_pid" 2>/dev/null
+
+  cat "$out_file" 2>/dev/null
+  rm -f "$out_file" 2>/dev/null
+
+  return $ret
+}
+
 get_primary_ip() {
-  local default_if ip_addr
+  local default_if ip_addr="" iface
+  local -a candidates
 
-  default_if="$(route get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
-  if [[ -n "$default_if" ]]; then
-    ip_addr="$(ipconfig getifaddr "$default_if" 2>/dev/null)"
-  fi
+  # -n keeps route(8) from translating the gateway back into a name. Without it
+  # route reverse-resolves the address, and that lookup waits out the full
+  # resolver timeout whenever a VPN or proxy profile leaves PTR queries
+  # unanswered, stalling every new shell for seconds.
+  default_if="$(run_with_timeout 1 route -n get default | awk '/interface:/{print $2; exit}')"
 
-  [[ -n "$ip_addr" ]] || ip_addr="$(ipconfig getifaddr en0 2>/dev/null)"
-  [[ -n "$ip_addr" ]] || ip_addr="$(ipconfig getifaddr en1 2>/dev/null)"
+  # Tunnel interfaces are not managed by IPConfiguration, so asking configd for
+  # their address only costs a round-trip and comes back empty anyway. Skipping
+  # them goes straight to the LAN address, which is what got reported before.
+  case "$default_if" in
+    utun*|ipsec*|ppp*|tun*|tap*|gif*|stf*) default_if="" ;;
+  esac
+
+  candidates=(en0 en1)
+  [[ -n "$default_if" ]] && candidates=("$default_if" "${candidates[@]}")
+  candidates=("${(@u)candidates}")
+
+  for iface in "${candidates[@]}"; do
+    ip_addr="$(run_with_timeout 1 ipconfig getifaddr "$iface")"
+    [[ -n "$ip_addr" ]] && break
+  done
+
   [[ -n "$ip_addr" ]] || ip_addr="N/A"
 
   printf '%s' "$ip_addr"
