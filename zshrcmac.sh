@@ -531,9 +531,15 @@ meow_disk_probe() {
   [[ -n "$out" ]] || return
   line="${${(f)out}[2]}"
   fields=(${=line})
-  [[ "${fields[2]-}" == <-> && "${fields[3]-}" == <-> ]] || return
+  [[ "${fields[2]-}" == <-> && "${fields[4]-}" == <-> ]] || return
+  # Size minus available, not df's Used column. On APFS every volume shares one
+  # container, and Used counts only the volume asked about: the system volume,
+  # VM swap and snapshots were all left out, so the banner read 64% on the CI
+  # runner where fastfetch and Finder read 70%. Available is the container's
+  # free space, so size minus it is what the whole disk has in use. HFS+
+  # (10.12 and older) shares nothing, so there it makes no difference.
   MEOW_DISK_TOTAL=$(( fields[2] / 1024 ))
-  MEOW_DISK_USED=$(( fields[3] / 1024 ))
+  MEOW_DISK_USED=$(( (fields[2] - fields[4]) / 1024 ))
   (( MEOW_DISK_TOTAL > 0 )) || MEOW_DISK_TOTAL=1
   MEOW_DISK_PERCENT=$(( (200 * MEOW_DISK_USED + MEOW_DISK_TOTAL) / (2 * MEOW_DISK_TOTAL) ))
 }
