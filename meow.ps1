@@ -17,6 +17,92 @@ function Write-MeowLine {
     Write-Host $Text
 }
 
+# ---------------------------------------------------------------------------
+# Cache
+#
+# A CIM query costs tens to hundreds of milliseconds and this banner made eight
+# of them, several for facts that cannot change while the machine is running.
+# They go in ONE fixed file that is rewritten in place, so ten thousand
+# terminals leave one file behind rather than ten thousand. Each record carries
+# its own timestamp so entries can expire on different schedules.
+# ---------------------------------------------------------------------------
+
+$MeowStaticTtl = if ($env:MEOW_STATIC_TTL) { [int]$env:MEOW_STATIC_TTL } else { 604800 }
+$MeowSampleTtl = if ($env:MEOW_SAMPLE_TTL) { [int]$env:MEOW_SAMPLE_TTL } else { 10 }
+$MeowNow = [int][double]::Parse(([datetimeoffset]::UtcNow.ToUnixTimeSeconds()).ToString())
+
+$MeowCacheDir = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'meow-terminal' }
+                elseif ($env:XDG_CACHE_HOME) { Join-Path $env:XDG_CACHE_HOME 'meow-terminal' }
+                elseif ($env:HOME) { Join-Path $env:HOME '.cache/meow-terminal' }
+                else { Join-Path ([System.IO.Path]::GetTempPath()) 'meow-terminal' }
+$MeowCacheFile = Join-Path $MeowCacheDir 'facts'
+$MeowCache = @{}
+$MeowCacheDirty = $false
+
+function Read-MeowCache {
+    if (-not (Test-Path -LiteralPath $script:MeowCacheFile)) { return }
+    try {
+        foreach ($line in [System.IO.File]::ReadAllLines($script:MeowCacheFile)) {
+            $parts = $line.Split(' ', 3)
+            if ($parts.Count -lt 3) { continue }
+            $stamp = 0
+            if (-not [int]::TryParse($parts[0], [ref]$stamp)) { continue }
+            $script:MeowCache[$parts[1]] = @{ Stamp = $stamp; Value = $parts[2] }
+        }
+    } catch {
+    }
+}
+
+# Age 0 never expires.
+function Get-MeowCache {
+    param([string]$Key, [int]$MaxAge)
+
+    $entry = $script:MeowCache[$Key]
+    if (-not $entry) { return $null }
+    if ($MaxAge -gt 0 -and ($script:MeowNow - $entry.Stamp) -gt $MaxAge) { return $null }
+    return $entry.Value
+}
+
+function Set-MeowCache {
+    param([string]$Key, [string]$Value)
+
+    $script:MeowCache[$Key] = @{ Stamp = $script:MeowNow; Value = $Value }
+    $script:MeowCacheDirty = $true
+}
+
+function Save-MeowCache {
+    if (-not $script:MeowCacheDirty) { return }
+    try {
+        if (-not (Test-Path -LiteralPath $script:MeowCacheDir)) {
+            New-Item -ItemType Directory -Force -Path $script:MeowCacheDir | Out-Null
+        }
+        $lines = foreach ($key in $script:MeowCache.Keys) {
+            $e = $script:MeowCache[$key]
+            '{0} {1} {2}' -f $e.Stamp, $key, ($e.Value -replace '[\r\n]', ' ')
+        }
+        [System.IO.File]::WriteAllLines($script:MeowCacheFile, [string[]]$lines)
+    } catch {
+    }
+}
+
+# Returns the cached value, or runs the block once and caches what it returns.
+function Get-MeowCached {
+    param([string]$Key, [int]$Ttl, [scriptblock]$Compute)
+
+    $hit = Get-MeowCache -Key $Key -MaxAge $Ttl
+    if ($null -ne $hit) { return $hit }
+    $value = [string](& $Compute)
+    # An empty answer means the probe failed. Leaving it uncached means the
+    # caller falls back for this one run and we retry next shell, rather than
+    # pinning "Unknown CPU" in place for a week.
+    if ($value) { Set-MeowCache -Key $Key -Value $value }
+    return $value
+}
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+
 function Get-Color {
     param([int]$Percent = 0)
 
@@ -26,25 +112,19 @@ function Get-Color {
     return $GREEN
 }
 
-function Get-CpuCoreCount {
-    try {
-        $computer = Get-CimInstance Win32_ComputerSystem
-        if ($computer.NumberOfLogicalProcessors -gt 0) {
-            return [int]$computer.NumberOfLogicalProcessors
-        }
-    } catch {
-    }
+function Draw-Bar {
+    param([int]$Percent = 0)
 
-    try {
-        $cores = (Get-CimInstance Win32_Processor |
-            Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
-        if ($cores -gt 0) {
-            return [int]$cores
-        }
-    } catch {
-    }
+    $width = 18
+    if ($Percent -gt 100) { $Percent = 100 }
+    if ($Percent -lt 0) { $Percent = 0 }
+    $fill = [math]::Floor($Percent * $width / 100)
+    return ('█' * $fill) + ('░' * ($width - $fill))
+}
 
-    return 1
+function Format-BytesToMB {
+    param([double]$Bytes = 0)
+    return [math]::Round($Bytes / 1MB)
 }
 
 function Format-CpuCoreCount {
@@ -55,43 +135,33 @@ function Format-CpuCoreCount {
     return "$Cores cores"
 }
 
-function Draw-Bar {
-    param([int]$Percent = 0)
-
-    $width = 18
-    if ($Percent -gt 100) { $Percent = 100 }
-    if ($Percent -lt 0) { $Percent = 0 }
-
-    $fill = [math]::Floor($Percent * $width / 100)
-    $empty = $width - $fill
-
-    return ('█' * $fill) + ('░' * $empty)
-}
-
-function Format-BytesToMB {
-    param([double]$Bytes = 0)
-    return [math]::Round($Bytes / 1MB)
-}
-
 function Format-Uptime {
     param([datetime]$BootTime)
 
     if (-not $BootTime) { return 'N/A' }
-
     $span = (Get-Date) - $BootTime
     $parts = @()
-
     if ($span.Days -gt 0) { $parts += "$($span.Days)d" }
     if ($span.Hours -gt 0) { $parts += "$($span.Hours)h" }
     if ($span.Minutes -gt 0) { $parts += "$($span.Minutes)m" }
     if ($parts.Count -eq 0) { $parts += 'less than a minute' }
-
     return ($parts -join ' ')
 }
 
+function Color-Line {
+    param([string]$Line, [int]$Index)
+
+    $rainbowColors = @(31, 33, 32, 36, 34, 35)
+    $color = $rainbowColors[$Index % $rainbowColors.Count]
+    return "$([char]27)[$color" + "m$Line$([char]27)[0m"
+}
+
+# ---------------------------------------------------------------------------
+# Probes
+# ---------------------------------------------------------------------------
+
 function Get-PrimaryIPv4 {
     $ip = $null
-
     try {
         $ip = Get-NetIPAddress -AddressFamily IPv4 |
             Where-Object {
@@ -124,19 +194,45 @@ function Get-PrimaryIPv4 {
     return $ip
 }
 
+# Whether the machine has a battery at all cannot change, so a desktop stops
+# paying for the Win32_Battery query after its first shell.
 function Get-BatteryPercentage {
+    $has = Get-MeowCached -Key 'has_battery' -Ttl $script:MeowStaticTtl -Compute {
+        try {
+            $b = @(Get-CimInstance Win32_Battery -Property EstimatedChargeRemaining -ErrorAction Stop)
+            if ($b.Count -gt 0) { '1' } else { '0' }
+        } catch {
+            # Query failed rather than answered: return nothing so this is not
+            # cached, and a laptop does not lose its battery line for a week.
+            ''
+        }
+    }
+    if ($has -eq '0') { return '' }
+
     try {
-        $battery = Get-CimInstance Win32_Battery | Select-Object -First 1
+        $battery = Get-CimInstance Win32_Battery -Property EstimatedChargeRemaining | Select-Object -First 1
         if ($battery -and $null -ne $battery.EstimatedChargeRemaining) {
             return "$($battery.EstimatedChargeRemaining)%"
         }
     } catch {
     }
-
     return ''
 }
 
+# Get-Counter blocks for about a second because it has to take a baseline
+# sample before it can report a rate. The formatted perf class is maintained by
+# the system and reads instantly; Get-Counter stays as the fallback.
 function Get-CpuUsage {
+    try {
+        $perf = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor `
+                    -Filter "Name='_Total'" -Property PercentProcessorTime
+        if ($perf -and $null -ne $perf.PercentProcessorTime) {
+            $value = [int]$perf.PercentProcessorTime
+            if ($value -ge 0 -and $value -le 100) { return $value }
+        }
+    } catch {
+    }
+
     try {
         $counter = Get-Counter '\Processor(_Total)\% Processor Time'
         $value = [int][math]::Round($counter.CounterSamples[0].CookedValue)
@@ -148,64 +244,42 @@ function Get-CpuUsage {
     }
 }
 
+# Takes the Win32_OperatingSystem instance the caller already fetched, instead
+# of querying it a second time.
 function Get-MemoryStats {
+    param($OperatingSystem)
+
     try {
-        $os = Get-CimInstance Win32_OperatingSystem
-        $totalMB = [int][math]::Round([double]$os.TotalVisibleMemorySize / 1024)
-        $freeMB = [int][math]::Round([double]$os.FreePhysicalMemory / 1024)
+        $totalMB = [int][math]::Round([double]$OperatingSystem.TotalVisibleMemorySize / 1024)
+        $freeMB = [int][math]::Round([double]$OperatingSystem.FreePhysicalMemory / 1024)
         $usedMB = [math]::Max(0, $totalMB - $freeMB)
         $percent = if ($totalMB -gt 0) { [int][math]::Round(($usedMB * 100) / $totalMB) } else { 0 }
-
-        return [pscustomobject]@{
-            UsedMB   = $usedMB
-            TotalMB  = $totalMB
-            Percent  = $percent
-        }
+        return [pscustomobject]@{ UsedMB = $usedMB; TotalMB = $totalMB; Percent = $percent }
     } catch {
-        return [pscustomobject]@{
-            UsedMB   = 0
-            TotalMB  = 0
-            Percent  = 0
-        }
+        return [pscustomobject]@{ UsedMB = 0; TotalMB = 0; Percent = 0 }
     }
 }
 
 function Get-SwapStats {
     try {
-        $pageFiles = @(Get-CimInstance Win32_PageFileUsage)
+        $pageFiles = @(Get-CimInstance Win32_PageFileUsage -Property CurrentUsage, AllocatedBaseSize)
         if ($pageFiles.Count -eq 0) {
-            return [pscustomobject]@{
-                UsedMB  = 0
-                TotalMB = 0
-                Percent = 0
-            }
+            return [pscustomobject]@{ UsedMB = 0; TotalMB = 0; Percent = 0 }
         }
-
         $usedMB = [int](($pageFiles | Measure-Object -Property CurrentUsage -Sum).Sum)
         $totalMB = [int](($pageFiles | Measure-Object -Property AllocatedBaseSize -Sum).Sum)
         $percent = if ($totalMB -gt 0) { [int][math]::Round(($usedMB * 100) / $totalMB) } else { 0 }
-
-        return [pscustomobject]@{
-            UsedMB  = $usedMB
-            TotalMB = $totalMB
-            Percent = $percent
-        }
+        return [pscustomobject]@{ UsedMB = $usedMB; TotalMB = $totalMB; Percent = $percent }
     } catch {
-        return [pscustomobject]@{
-            UsedMB  = 0
-            TotalMB = 0
-            Percent = 0
-        }
+        return [pscustomobject]@{ UsedMB = 0; TotalMB = 0; Percent = 0 }
     }
 }
 
 function Get-DiskStats {
     $results = @()
-
     try {
-        $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType = 3" |
-            Sort-Object DeviceID
-
+        $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType = 3" `
+                      -Property DeviceID, Size, FreeSpace | Sort-Object DeviceID
         foreach ($drive in $drives) {
             $sizeBytes = [double]$drive.Size
             $freeBytes = [double]$drive.FreeSpace
@@ -213,111 +287,132 @@ function Get-DiskStats {
             $totalMB = Format-BytesToMB $sizeBytes
             $usedMB = Format-BytesToMB $usedBytes
             $percent = if ($totalMB -gt 0) { [int][math]::Round(($usedMB * 100) / $totalMB) } else { 0 }
-
             $results += [pscustomobject]@{
-                Name    = $drive.DeviceID
-                UsedMB  = $usedMB
-                TotalMB = $totalMB
-                Percent = $percent
+                Name = $drive.DeviceID; UsedMB = $usedMB; TotalMB = $totalMB; Percent = $percent
             }
         }
     } catch {
     }
-
     return $results
 }
 
+# Adapter names are fixed hardware, so they are cached. The utilisation counter
+# is another ~1 s Get-Counter call, so it is refreshed only every
+# MEOW_SAMPLE_TTL seconds rather than on every single shell.
 function Get-GpuStats {
     $gpuStats = @()
     $nameMap = @{}
 
-    try {
-        $controllers = Get-CimInstance Win32_VideoController |
-            Where-Object { $_.Name -and $_.AdapterRAM -gt 0 }
-
-        $index = 0
-        foreach ($controller in $controllers) {
-            $nameMap[$index] = $controller.Name
-            $gpuStats += [pscustomobject]@{
-                Index   = $index
-                Name    = $controller.Name
-                Usage   = $null
-                Source  = 'adapter'
-            }
-            $index++
+    $namesRaw = Get-MeowCached -Key 'gpu_names' -Ttl $script:MeowStaticTtl -Compute {
+        $names = @()
+        try {
+            $controllers = Get-CimInstance Win32_VideoController -Property Name, AdapterRAM |
+                Where-Object { $_.Name -and $_.AdapterRAM -gt 0 }
+            foreach ($c in $controllers) { $names += $c.Name }
+        } catch {
         }
-    } catch {
+        ($names -join '|')
     }
 
-    try {
-        $samples = (Get-Counter '\GPU Engine(*)\Utilization Percentage').CounterSamples |
-            Where-Object {
-                $_.InstanceName -match 'engtype_' -and
-                $_.CookedValue -ge 0
-            }
+    $index = 0
+    if ($namesRaw) {
+        foreach ($name in $namesRaw.Split('|')) {
+            if (-not $name) { continue }
+            $nameMap[$index] = $name
+            $gpuStats += [pscustomobject]@{ Index = $index; Name = $name; Usage = $null; Source = 'adapter' }
+            $index++
+        }
+    }
 
-        if ($samples.Count -gt 0) {
-            $usageByGpu = @{}
-
-            foreach ($sample in $samples) {
-                if ($sample.InstanceName -match 'phys_([0-9]+)') {
-                    $gpuIndex = [int]$matches[1]
-                    if (-not $usageByGpu.ContainsKey($gpuIndex)) {
-                        $usageByGpu[$gpuIndex] = 0.0
+    $usageRaw = Get-MeowCached -Key 'gpu_usage' -Ttl $script:MeowSampleTtl -Compute {
+        $pairs = @()
+        try {
+            $samples = (Get-Counter '\GPU Engine(*)\Utilization Percentage').CounterSamples |
+                Where-Object { $_.InstanceName -match 'engtype_' -and $_.CookedValue -ge 0 }
+            if ($samples.Count -gt 0) {
+                $usageByGpu = @{}
+                foreach ($sample in $samples) {
+                    if ($sample.InstanceName -match 'phys_([0-9]+)') {
+                        $gpuIndex = [int]$matches[1]
+                        if (-not $usageByGpu.ContainsKey($gpuIndex)) { $usageByGpu[$gpuIndex] = 0.0 }
+                        $usageByGpu[$gpuIndex] += [double]$sample.CookedValue
                     }
-                    $usageByGpu[$gpuIndex] += [double]$sample.CookedValue
+                }
+                foreach ($gpuIndex in $usageByGpu.Keys) {
+                    $pairs += ('{0}:{1}' -f $gpuIndex, [int][math]::Round([math]::Min($usageByGpu[$gpuIndex], 100)))
                 }
             }
+        } catch {
+        }
+        ($pairs -join '|')
+    }
 
-            foreach ($gpuIndex in $usageByGpu.Keys) {
-                $usage = [int][math]::Round([math]::Min($usageByGpu[$gpuIndex], 100))
+    if ($usageRaw) {
+        foreach ($pair in $usageRaw.Split('|')) {
+            if (-not $pair) { continue }
+            $bits = $pair.Split(':')
+            if ($bits.Count -ne 2) { continue }
+            $gpuIndex = [int]$bits[0]
+            $usage = [int]$bits[1]
+            $existing = $gpuStats | Where-Object { $_.Index -eq $gpuIndex } | Select-Object -First 1
+            if ($existing) {
+                $existing.Usage = $usage
+                $existing.Source = 'counter'
+            } else {
                 $name = if ($nameMap.ContainsKey($gpuIndex)) { $nameMap[$gpuIndex] } else { "GPU $gpuIndex" }
-
-                $existing = $gpuStats | Where-Object { $_.Index -eq $gpuIndex } | Select-Object -First 1
-                if ($existing) {
-                    $existing.Usage = $usage
-                    $existing.Source = 'counter'
-                } else {
-                    $gpuStats += [pscustomobject]@{
-                        Index   = $gpuIndex
-                        Name    = $name
-                        Usage   = $usage
-                        Source  = 'counter'
-                    }
-                }
+                $gpuStats += [pscustomobject]@{ Index = $gpuIndex; Name = $name; Usage = $usage; Source = 'counter' }
             }
         }
-    } catch {
     }
 
     return $gpuStats | Sort-Object Index
 }
 
-function Color-Line {
-    param(
-        [string]$Line,
-        [int]$Index
-    )
+# ---------------------------------------------------------------------------
+# Gather
+# ---------------------------------------------------------------------------
 
-    $rainbowColors = @(31, 33, 32, 36, 34, 35)
-    $color = $rainbowColors[$Index % $rainbowColors.Count]
-    return "$([char]27)[$color" + "m$Line$([char]27)[0m"
-}
+Read-MeowCache
 
-$computerSystem = Get-CimInstance Win32_ComputerSystem
-$operatingSystem = Get-CimInstance Win32_OperatingSystem
 $hostName = $env:COMPUTERNAME
+if (-not $hostName) { $hostName = [System.Net.Dns]::GetHostName() }
 $arch = $env:PROCESSOR_ARCHITECTURE
-$modelName = if ($computerSystem.Model) { $computerSystem.Model } else { 'Windows Machine' }
-$chip = (Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name -First 1)
+if (-not $arch) { $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() }
+
+# Model and CPU name are fixed hardware: two CIM queries that only ever ran to
+# print the same two strings. Cached, they cost nothing after the first shell.
+$modelName = Get-MeowCached -Key 'model' -Ttl $MeowStaticTtl -Compute {
+    try {
+        $cs = Get-CimInstance Win32_ComputerSystem -Property Model -ErrorAction Stop
+        if ($cs.Model) { $cs.Model } else { '' }
+    } catch { '' }
+}
+if (-not $modelName) { $modelName = 'Windows Machine' }
+
+$chip = Get-MeowCached -Key 'chip' -Ttl $MeowStaticTtl -Compute {
+    try {
+        $p = Get-CimInstance Win32_Processor -Property Name -ErrorAction Stop |
+                 Select-Object -ExpandProperty Name -First 1
+        if ($p) { $p } else { '' }
+    } catch { '' }
+}
 if (-not $chip) { $chip = 'Unknown CPU' }
+
+# .NET already knows this; Win32_ComputerSystem and Win32_Processor were being
+# queried purely to count logical processors.
+$cpuCores = [Environment]::ProcessorCount
+if ($cpuCores -lt 1) { $cpuCores = 1 }
+$cpuCoreText = Format-CpuCoreCount $cpuCores
+
+# One query, reused for both uptime and memory. It used to be fetched twice.
+$operatingSystem = Get-CimInstance Win32_OperatingSystem `
+                       -Property LastBootUpTime, TotalVisibleMemorySize, FreePhysicalMemory
+
 $ipAddr = Get-PrimaryIPv4
 $uptime = Format-Uptime $operatingSystem.LastBootUpTime
 $battery = Get-BatteryPercentage
 $cpuUsage = Get-CpuUsage
-$cpuCores = Get-CpuCoreCount
-$cpuCoreText = Format-CpuCoreCount $cpuCores
-$memory = Get-MemoryStats
+$memory = Get-MemoryStats -OperatingSystem $operatingSystem
 $swap = Get-SwapStats
 $disks = @(Get-DiskStats)
 $gpuStats = @(Get-GpuStats)
@@ -548,7 +643,7 @@ $infoLines += "${DIM}CPU:${RESET} ${YELLOW}${chip}${RESET} ${DIM}(${arch})${RESE
 $infoLines += "${DIM}User:${RESET} ${LIGHT_GREEN}$($env:USERNAME)${RESET}@${LIGHT_GREEN}${hostName}${RESET}"
 $infoLines += "${DIM}========================================${RESET}"
 $infoLines += "${CYAN}CPU Usage: ${cpuColor}${cpuBar} ${cpuUsage}% (${cpuCoreText})${RESET}"
-$infoLines += "${CYAN}RAM Usage: $(Get-Color $memory.Percent)${ramBar} $($memory.Percent)% ($($memory.UsedMB)/$($memory.TotalMB) MB)${RESET}"
+$infoLines += "${CYAN}RAM Usage: ${ramColor}${ramBar} $($memory.Percent)% ($($memory.UsedMB)/$($memory.TotalMB) MB)${RESET}"
 
 if ($swap.TotalMB -gt 0) {
     $swapBar = Draw-Bar $swap.Percent
@@ -581,47 +676,20 @@ foreach ($disk in $disks) {
     $infoLines += "${CYAN}Disk $($disk.Name): ${diskColor}${diskBar} $($disk.Percent)% ($($disk.UsedMB)/$($disk.TotalMB) MB)${RESET}"
 }
 
-function Get-DisplayWidth {
-    param([string]$Text)
-
-    $stripped = $Text -replace '\x1b\[[0-9;]*m', ''
-    $width = 6
-
-    for ($i = 0; $i -lt $stripped.Length; $i++) {
-        $char = $stripped[$i]
-        $codePoint = [int][char]$char
-
-        if (($codePoint -ge 0x1100 -and $codePoint -le 0x115F) -or
-            ($codePoint -ge 0x2329 -and $codePoint -le 0x232A) -or
-            ($codePoint -ge 0x2E80 -and $codePoint -le 0x303E) -or
-            ($codePoint -ge 0x3040 -and $codePoint -le 0xA4CF) -or
-            ($codePoint -ge 0xAC00 -and $codePoint -le 0xD7A3) -or
-            ($codePoint -ge 0xF900 -and $codePoint -le 0xFAFF) -or
-            ($codePoint -ge 0xFE10 -and $codePoint -le 0xFE19) -or
-            ($codePoint -ge 0xFE30 -and $codePoint -le 0xFE6F) -or
-            ($codePoint -ge 0xFF00 -and $codePoint -le 0xFF60) -or
-            ($codePoint -ge 0xFFE0 -and $codePoint -le 0xFFE6)) {
-            $width += 2
-        } else {
-            $width += 1
-        }
-    }
-
-    return $width
-}
-
-$targetWidth = 1
+# Get-DisplayWidth used to measure every line character by character, then pad
+# by "targetWidth - width" with targetWidth fixed at 1. That is never positive,
+# so the padding was always clamped to zero and the measurement thrown away.
 for ($i = 0; $i -lt $deviceArt.Count; $i++) {
     $left = $deviceArt[$i]
     $right = if ($i -lt $infoLines.Count) { $infoLines[$i] } else { '' }
-    $displayWidth = Get-DisplayWidth $left
-    $padding = [math]::Max(0, $targetWidth - $displayWidth)
-    Write-Host ("{0}{1} {2}" -f $left, (' ' * $padding), $right)
+    Write-Host ("{0} {1}" -f $left, $right)
 }
 
 Write-MeowLine ''
 Write-MeowLine "${DIM}============================================================${RESET}"
 Write-MeowLine ''
+
+Save-MeowCache
 
 if (Get-Command fastfetch -ErrorAction SilentlyContinue) {
     fastfetch

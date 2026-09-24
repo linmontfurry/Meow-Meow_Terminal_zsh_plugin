@@ -93,7 +93,10 @@ meow_cached() {
   meow_cache_get "$key" "$ttl" && return 0
   REPLY=""
   "$@"
-  meow_cache_set "$key" "$REPLY"
+  # An empty answer means the probe failed. Leave it out of the cache so the
+  # caller falls back for this one run and we try again next shell, instead of
+  # pinning "Unknown CPU" in place for a week.
+  [[ -n "$REPLY" ]] && meow_cache_set "$key" "$REPLY"
   return 0
 }
 
@@ -224,7 +227,7 @@ meow_sysctl_batch() {
 meow_cpu_cores() {
   REPLY=${MEOW_SYS_CORES:-0}
   [[ "$REPLY" == <-> && $REPLY -gt 0 ]] || REPLY="$(sysctl -n hw.ncpu 2>/dev/null)"
-  [[ "$REPLY" == <-> && $REPLY -gt 0 ]] || REPLY=1
+  [[ "$REPLY" == <-> && $REPLY -gt 0 ]] || REPLY=""
 }
 
 meow_format_cores() {
@@ -262,12 +265,10 @@ meow_mac_hardware() {
       (ProcessorName) [[ -n "$MEOW_MAC_CHIP" ]]  || MEOW_MAC_CHIP="$value" ;;
     esac
   done
-  [[ -n "$MEOW_MAC_MODEL" ]] || MEOW_MAC_MODEL="Mac"
   if [[ -z "$MEOW_MAC_CHIP" ]]; then
     MEOW_MAC_CHIP="$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
     meow_trim "$MEOW_MAC_CHIP"; MEOW_MAC_CHIP="$REPLY"
   fi
-  [[ -n "$MEOW_MAC_CHIP" ]] || MEOW_MAC_CHIP="Unknown CPU"
 }
 
 meow_gpu_names() {
@@ -473,12 +474,12 @@ if [[ -z "${MODEL_NAME:-}" || -z "${CHIP:-}" ]]; then
   meow_mac_hardware
   MODEL_NAME="$MEOW_MAC_MODEL"
   CHIP="$MEOW_MAC_CHIP"
-  meow_cache_set mac_model "$MODEL_NAME"
-  meow_cache_set mac_chip "$CHIP"
+  [[ -n "$MODEL_NAME" ]] && meow_cache_set mac_model "$MODEL_NAME"
+  [[ -n "$CHIP" ]] && meow_cache_set mac_chip "$CHIP"
 fi
 if (( ${#MEOW_GPU_NAMES} == 0 )); then
   meow_gpu_names
-  meow_cache_set mac_gpus "${(pj:\n:)MEOW_GPU_NAMES}"
+  (( ${#MEOW_GPU_NAMES} > 0 )) && meow_cache_set mac_gpus "${(pj:\n:)MEOW_GPU_NAMES}"
 fi
 [[ -n "$MODEL_NAME" ]] || MODEL_NAME="Mac"
 [[ -n "$CHIP" ]] || CHIP="Unknown CPU"

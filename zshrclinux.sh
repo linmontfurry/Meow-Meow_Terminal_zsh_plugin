@@ -93,7 +93,10 @@ meow_cached() {
   meow_cache_get "$key" "$ttl" && return 0
   REPLY=""
   "$@"
-  meow_cache_set "$key" "$REPLY"
+  # An empty answer means the probe failed. Leave it out of the cache so the
+  # caller falls back for this one run and we try again next shell, instead of
+  # pinning "Unknown CPU" in place for a week.
+  [[ -n "$REPLY" ]] && meow_cache_set "$key" "$REPLY"
   return 0
 }
 
@@ -228,7 +231,6 @@ meow_cpu_model() {
       esac
     done
   fi
-  [[ -n "$REPLY" ]] || REPLY="Unknown CPU"
 }
 
 meow_cpu_cores() {
@@ -253,8 +255,7 @@ meow_cpu_cores() {
       [[ "$key" == processor ]] && (( total++ ))
     done < /proc/cpuinfo
   fi
-  (( total > 0 )) || total=1
-  REPLY=$total
+  if (( total > 0 )); then REPLY=$total; else REPLY=""; fi
 }
 
 meow_format_cores() {
