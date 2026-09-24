@@ -38,6 +38,7 @@ $MeowCacheDir = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'meow-termi
 $MeowCacheFile = Join-Path $MeowCacheDir 'facts'
 $MeowCache = @{}
 $MeowCacheDirty = $false
+$MeowUsage = $null
 
 function Read-MeowCache {
     if (-not (Test-Path -LiteralPath $script:MeowCacheFile)) { return }
@@ -182,34 +183,58 @@ function Add-MeowGauge {
 # Probes
 # ---------------------------------------------------------------------------
 
+# The address traffic actually leaves from. "Connecting" a UDP socket to a
+# public address makes the OS pick a route without sending anything, and the
+# socket's local end is that route's source address: the same rule the route
+# lookups in the macOS and Linux banners follow. The old Get-NetIPAddress path
+# sorted every address by interface metric and chose the Hyper-V switch on the
+# CI runner (172.23.x.1) while fastfetch reported Ethernet 3 (10.1.0.x), and it
+# loaded the NetTCPIP module plus a CIM query to do it.
+#
+# As on macOS, a tunnel that owns the default route (a VPN, or a TUN-mode proxy
+# such as Clash) is looked past to the physical adapter underneath, if any.
 function Get-PrimaryIPv4 {
     $ip = $null
     try {
-        $ip = Get-NetIPAddress -AddressFamily IPv4 |
-            Where-Object {
-                $_.IPAddress -notmatch '^127\.' -and
-                $_.IPAddress -notmatch '^169\.254\.' -and
-                $_.PrefixOrigin -ne 'WellKnown'
-            } |
-            Sort-Object -Property InterfaceMetric, SkipAsSource |
-            Select-Object -ExpandProperty IPAddress -First 1
+        $socket = [System.Net.Sockets.Socket]::new(
+            [System.Net.Sockets.AddressFamily]::InterNetwork,
+            [System.Net.Sockets.SocketType]::Dgram,
+            [System.Net.Sockets.ProtocolType]::Udp)
+        try {
+            $socket.Connect('1.1.1.1', 53)
+            $ip = $socket.LocalEndPoint.Address.ToString()
+        } finally {
+            $socket.Dispose()
+        }
     } catch {
     }
 
-    if (-not $ip) {
-        try {
-            $ip = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
-                Where-Object { $_.OperationalStatus -eq 'Up' } |
-                ForEach-Object { $_.GetIPProperties().UnicastAddresses } |
-                Where-Object {
+    # Ppp, proprietary virtual (Wintun: WireGuard, Clash, ...), Tunnel
+    $tunnelTypes = @(23, 53, 131)
+    try {
+        $nics = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
+            Where-Object { $_.OperationalStatus -eq 'Up' })
+        $owner = $nics | Where-Object {
+            @($_.GetIPProperties().UnicastAddresses | ForEach-Object { $_.Address.ToString() }) -contains $ip
+        } | Select-Object -First 1
+
+        if (-not $ip -or ($owner -and [int]$owner.NetworkInterfaceType -in $tunnelTypes)) {
+            foreach ($nic in $nics) {
+                if ([int]$nic.NetworkInterfaceType -in ($tunnelTypes + 24)) { continue }   # 24: loopback
+                $props = $nic.GetIPProperties()
+                $hasGateway = $props.GatewayAddresses | Where-Object {
                     $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
-                    $_.Address.IPAddressToString -notmatch '^127\.' -and
-                    $_.Address.IPAddressToString -notmatch '^169\.254\.'
-                } |
-                Select-Object -ExpandProperty Address -First 1 |
-                ForEach-Object { $_.IPAddressToString }
-        } catch {
+                    $_.Address.ToString() -ne '0.0.0.0'
+                }
+                if (-not $hasGateway) { continue }
+                $lan = $props.UnicastAddresses | Where-Object {
+                    $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
+                    $_.Address.ToString() -notmatch '^(127\.|169\.254\.)'
+                } | Select-Object -First 1
+                if ($lan) { $ip = $lan.Address.ToString(); break }
+            }
         }
+    } catch {
     }
 
     if (-not $ip) { $ip = 'N/A' }
@@ -241,28 +266,68 @@ function Get-BatteryPercentage {
     return ''
 }
 
-# Get-Counter blocks for about a second because it has to take a baseline
-# sample before it can report a rate. The formatted perf class is maintained by
-# the system and reads instantly; Get-Counter stays as the fallback.
-function Get-CpuUsage {
-    try {
-        $perf = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'"
-        if ($perf -and $null -ne $perf.PercentProcessorTime) {
-            $value = [int]$perf.PercentProcessorTime
-            if ($value -ge 0 -and $value -le 100) { return $value }
+# CPU and GPU utilisation are rates, so each needs two readings. Get-Counter
+# takes both in one call, waiting about a second between its readings, and the
+# answer is kept for MEOW_SAMPLE_TTL seconds. The WMI "formatted" CPU class used
+# in between returned at once but reported 0% until WMI had a baseline of its
+# own: on three CI runs, on a runner busy running this very script, it read 0,
+# 26 and 0.
+#
+# Returned as "cpu|index:percent|...", the GPU part keyed by the physical
+# adapter index (phys_N) that Task Manager groups engines by. Memoised for the
+# run, so CPU and GPU share one sample even when it cannot be cached.
+function Get-UsageSample {
+    if ($null -ne $script:MeowUsage) { return $script:MeowUsage }
+    $hit = Get-MeowCache -Key 'usage' -MaxAge $script:MeowSampleTtl
+    if ($null -ne $hit) { $script:MeowUsage = $hit; return $hit }
+
+    $cpuPath = '\Processor(_Total)\% Processor Time'
+    $gpuPath = '\GPU Engine(*)\Utilization Percentage'
+    $samples = $null
+    if ((Get-MeowCache -Key 'has_gpu_counters' -MaxAge $script:MeowStaticTtl) -ne '0') {
+        try {
+            $samples = (Get-Counter -Counter $cpuPath, $gpuPath -ErrorAction Stop).CounterSamples
+            Set-MeowCache -Key 'has_gpu_counters' -Value '1'
+        } catch {
+            # No GPU engine counters here (older Windows, some VMs). Remember
+            # that, so later shells ask for the CPU alone straight away.
+            Set-MeowCache -Key 'has_gpu_counters' -Value '0'
         }
-    } catch {
+    }
+    if (-not $samples) {
+        try { $samples = (Get-Counter -Counter $cpuPath -ErrorAction Stop).CounterSamples } catch { }
     }
 
-    try {
-        $counter = Get-Counter '\Processor(_Total)\% Processor Time'
-        $value = [int][math]::Round($counter.CounterSamples[0].CookedValue)
-        if ($value -lt 0) { $value = 0 }
-        if ($value -gt 100) { $value = 100 }
-        return $value
-    } catch {
-        return 0
+    $cpu = ''
+    $usageByGpu = @{}
+    foreach ($sample in @($samples)) {
+        if (-not $sample) { continue }
+        if ($sample.Path -like '*\processor(_total)\*') {
+            $cpu = [string][math]::Min(100, [math]::Max(0, [int][math]::Round($sample.CookedValue)))
+            continue
+        }
+        if ($sample.CookedValue -lt 0 -or $sample.InstanceName -notmatch 'engtype_') { continue }
+        # Match phys_ last: $matches holds the most recent successful -match.
+        if ($sample.InstanceName -match 'phys_([0-9]+)') {
+            $gpuIndex = [int]$matches[1]
+            if (-not $usageByGpu.ContainsKey($gpuIndex)) { $usageByGpu[$gpuIndex] = 0.0 }
+            $usageByGpu[$gpuIndex] += [double]$sample.CookedValue
+        }
     }
+
+    $parts = @($cpu)
+    foreach ($gpuIndex in ($usageByGpu.Keys | Sort-Object)) {
+        $parts += '{0}:{1}' -f $gpuIndex, [int][math]::Round([math]::Min([double]100, $usageByGpu[$gpuIndex]))
+    }
+    $script:MeowUsage = $parts -join '|'
+    if ($cpu) { Set-MeowCache -Key 'usage' -Value $script:MeowUsage }
+    return $script:MeowUsage
+}
+
+function Get-CpuUsage {
+    $cpu = (Get-UsageSample).Split('|')[0]
+    if ($cpu -match '^\d+$') { return [int]$cpu }
+    return 0
 }
 
 # Takes the Win32_OperatingSystem instance the caller already fetched, instead
@@ -281,15 +346,20 @@ function Get-MemoryStats {
     }
 }
 
+# The paging-file figures come with the Win32_OperatingSystem query this script
+# already makes, so Win32_PageFileUsage, a CIM query of its own, is no longer
+# needed. Both are reported in KB.
 function Get-SwapStats {
+    param($OperatingSystem)
+
     try {
-        $pageFiles = @(Get-CimInstance Win32_PageFileUsage -Property CurrentUsage, AllocatedBaseSize)
-        if ($pageFiles.Count -eq 0) {
+        $totalMB = [int][math]::Round([double]$OperatingSystem.SizeStoredInPagingFiles / 1024)
+        $freeMB = [int][math]::Round([double]$OperatingSystem.FreeSpaceInPagingFiles / 1024)
+        if ($totalMB -le 0) {
             return [pscustomobject]@{ UsedMB = 0; TotalMB = 0; Percent = 0 }
         }
-        $usedMB = [int](($pageFiles | Measure-Object -Property CurrentUsage -Sum).Sum)
-        $totalMB = [int](($pageFiles | Measure-Object -Property AllocatedBaseSize -Sum).Sum)
-        $percent = if ($totalMB -gt 0) { [int][math]::Round(($usedMB * 100) / $totalMB) } else { 0 }
+        $usedMB = [math]::Max(0, $totalMB - $freeMB)
+        $percent = [int][math]::Round(($usedMB * 100) / $totalMB)
         return [pscustomobject]@{ UsedMB = $usedMB; TotalMB = $totalMB; Percent = $percent }
     } catch {
         return [pscustomobject]@{ UsedMB = 0; TotalMB = 0; Percent = 0 }
@@ -358,28 +428,7 @@ function Get-GpuStats {
         }
     }
 
-    $usageRaw = Get-MeowCached -Key 'gpu_usage' -Ttl $script:MeowSampleTtl -Compute {
-        $pairs = @()
-        try {
-            $samples = (Get-Counter '\GPU Engine(*)\Utilization Percentage').CounterSamples |
-                Where-Object { $_.InstanceName -match 'engtype_' -and $_.CookedValue -ge 0 }
-            if ($samples.Count -gt 0) {
-                $usageByGpu = @{}
-                foreach ($sample in $samples) {
-                    if ($sample.InstanceName -match 'phys_([0-9]+)') {
-                        $gpuIndex = [int]$matches[1]
-                        if (-not $usageByGpu.ContainsKey($gpuIndex)) { $usageByGpu[$gpuIndex] = 0.0 }
-                        $usageByGpu[$gpuIndex] += [double]$sample.CookedValue
-                    }
-                }
-                foreach ($gpuIndex in $usageByGpu.Keys) {
-                    $pairs += ('{0}:{1}' -f $gpuIndex, [int][math]::Round([math]::Min($usageByGpu[$gpuIndex], 100)))
-                }
-            }
-        } catch {
-        }
-        ($pairs -join '|')
-    }
+    $usageRaw = (@((Get-UsageSample).Split('|')) | Select-Object -Skip 1) -join '|'
 
     if ($usageRaw) {
         foreach ($pair in $usageRaw.Split('|')) {
@@ -407,6 +456,20 @@ function Get-GpuStats {
 # ---------------------------------------------------------------------------
 
 Read-MeowCache
+
+# Windows' counterpart to root is an elevated process ("Run as administrator"),
+# not an account that happens to be named Administrator. That built-in account
+# is disabled by default on Windows 10 and 11, so the old name check almost
+# never fired, and the elevated runneradmin on CI got the ordinary cat. Under
+# UAC, an administrator's normal unelevated shell does not count, just as a
+# sudoer is not root until they sudo.
+$isAdmin = $false
+try {
+    $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+} catch {
+    $isAdmin = ($env:USERNAME -eq 'Administrator')
+}
 
 $hostName = $env:COMPUTERNAME
 if (-not $hostName) { $hostName = [System.Net.Dns]::GetHostName() }
@@ -441,16 +504,17 @@ $cpuCores = [Environment]::ProcessorCount
 if ($cpuCores -lt 1) { $cpuCores = 1 }
 $cpuCoreText = Format-CpuCoreCount $cpuCores
 
-# One query, reused for both uptime and memory. It used to be fetched twice.
+# One query, reused for uptime, memory and the paging file.
 $operatingSystem = Get-CimInstance Win32_OperatingSystem `
-                       -Property LastBootUpTime, TotalVisibleMemorySize, FreePhysicalMemory
+                       -Property LastBootUpTime, TotalVisibleMemorySize, FreePhysicalMemory,
+                                 SizeStoredInPagingFiles, FreeSpaceInPagingFiles
 
 $ipAddr = Get-PrimaryIPv4
 $uptime = Format-Uptime $operatingSystem.LastBootUpTime
 $battery = Get-BatteryPercentage
 $cpuUsage = Get-CpuUsage
 $memory = Get-MemoryStats -OperatingSystem $operatingSystem
-$swap = Get-SwapStats
+$swap = Get-SwapStats -OperatingSystem $operatingSystem
 $disks = @(Get-DiskStats)
 $gpuStats = @(Get-GpuStats)
 
@@ -525,7 +589,7 @@ Write-MeowLine "${BLUE}Welcome to Meow-Meow Terminal!${RESET}"
 Write-MeowLine "${CYAN}Cat says:${RESET} ${ORANGE}${welcome}${RESET}"
 Write-MeowLine ''
 
-if ($env:USERNAME -eq 'Administrator') {
+if ($isAdmin) {
     $cat1 = @"
    /\_/\
   ( ⊙ʌ⊙ )
@@ -572,7 +636,7 @@ for ($i = 0; $i -lt [math]::Max($leftBlock.Count, $rightBlock.Count); $i++) {
 
 Write-MeowLine ''
 
-if ($env:USERNAME -eq 'Administrator') {
+if ($isAdmin) {
     $userName = "${RED}powerful master${RESET}"
     Write-MeowLine "${CYAN}Cat whispers: your username is ${userName}${CYAN}... oh no!${RESET}"
     Write-MeowLine "${RED}Cat is scared!${RESET}"
@@ -609,14 +673,11 @@ if ($connectionType) {
         Write-MeowLine "${CYAN}Cat noticed: you connected via ${MAGENTA}${connectionType}${CYAN} from ${YELLOW}somewhere mysterious${CYAN}...${RESET}"
     }
 } else {
+    # A Win32_LogonSession lookup used to sit here, filtered on LogonId = this
+    # process's SessionId. Those are different numbering schemes (a logon LUID
+    # against a terminal-session index), so it never matched: every shell paid
+    # for a CIM query and printed "Console" regardless.
     $ttyInfo = "Console"
-    try {
-        $sessionInfo = Get-CimInstance Win32_LogonSession -Filter "LogonId='$((Get-Process -Id $PID).SessionId)'" -ErrorAction SilentlyContinue
-        if ($sessionInfo) {
-            $ttyInfo = "Console (Session $($sessionInfo.LogonId))"
-        }
-    } catch {
-    }
     Write-MeowLine "${CYAN}Cat noticed: you're on local terminal ${YELLOW}${ttyInfo}${RESET}"
 }
 
