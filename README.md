@@ -17,7 +17,7 @@
 
 将仓库内对应系统的脚本文件下载复制
 
-Linux或者MacOS系统，请确保你的系统安装了 `zsh` 并且设置为默认终端，这样即可获得更加完整的体验
+Linux或者MacOS系统，请确保你的系统安装了 `zsh`（5.1 及以上）并且设置为默认终端，这样即可获得更加完整的体验
 
 对于Windows系统，请确保你安装了 `Chocolatey` 来安装其他必要的软件，比如 `FastFetch`
 
@@ -135,9 +135,13 @@ Ubuntu、Debian、Linux Mint、Pop!_OS 等 Debian 系更适合使用第一套
 
 安装教程：https://learn.microsoft.com/zh-cn/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.5
 
-2. 打开powershell7并安装fastfetch
- ``` winget install fastfetch 
- ```
+2. 以管理员身份打开 PowerShell 7，用 Chocolatey 安装 fastfetch
+
+还没有装 Chocolatey 的话，先按官方说明安装：https://chocolatey.org/install
+
+```powershell
+choco install fastfetch -y
+```
 
 3. 下载本项目并解压
 Code-Download ZIP
@@ -171,7 +175,7 @@ export MEOW_STATIC_TTL=604800   # 硬件信息缓存多久（秒），默认 7 �
 export MEOW_SAMPLE_TTL=10       # 昂贵采样缓存多久（秒），默认 10 秒
 ```
 
-`MEOW_SAMPLE_TTL` 管的是 CPU 占用率这类必须实时取、但取一次很慢的数据（Windows 的 CPU/GPU 计数器要等一秒，还有 `nvidia-smi`、`df`）。连开好几个标签页时它让后面几个几乎瞬间出来；调大更快，但显示的数字会更旧。想每次都重新探测就设成 `0`。
+`MEOW_SAMPLE_TTL` 管的是 CPU 占用率这类必须实时取、但取一次很慢的数据（CPU 占用要实测一小段时间：Linux 0.2 秒，Windows 的 CPU/GPU 计数器 1 秒；还有 `nvidia-smi`、`df`）。连开好几个标签页时它让后面几个几乎瞬间出来；调大更快，但显示的数字会更旧。想每次都重新探测就设成 `0`。
 
 探测失败不会写进缓存，所以偶尔一次失败不会让 `Unknown CPU` 之类的结果被锁上很久。
 
