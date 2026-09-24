@@ -53,12 +53,14 @@ function Read-MeowCache {
     }
 }
 
-# Age 0 never expires.
+# A negative age never expires. Zero always misses, so setting
+# MEOW_STATIC_TTL=0 or MEOW_SAMPLE_TTL=0 forces a fresh probe every shell.
 function Get-MeowCache {
     param([string]$Key, [int]$MaxAge)
 
     $entry = $script:MeowCache[$Key]
     if (-not $entry) { return $null }
+    if ($MaxAge -eq 0) { return $null }
     if ($MaxAge -gt 0 -and ($script:MeowNow - $entry.Stamp) -gt $MaxAge) { return $null }
     return $entry.Value
 }

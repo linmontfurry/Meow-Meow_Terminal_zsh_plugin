@@ -60,12 +60,15 @@ meow_cache_load() {
   done
 }
 
-# meow_cache_get <key> <max-age>  ->  REPLY, non-zero on miss. Age 0 never expires.
+# meow_cache_get <key> <max-age>  ->  REPLY, non-zero on miss.
+# A negative max age never expires. Zero always misses, so setting
+# MEOW_STATIC_TTL=0 or MEOW_SAMPLE_TTL=0 forces a fresh probe every shell.
 meow_cache_get() {
   local entry="${MEOW_CACHE[$1]-}" stamp
   [[ -n "$entry" ]] || return 1
   stamp="${entry%% *}"
   [[ "$stamp" == <-> ]] || return 1
+  (( $2 == 0 )) && return 1
   (( $2 > 0 && MEOW_NOW - stamp > $2 )) && return 1
   REPLY="${entry#* }"
   return 0
@@ -391,7 +394,7 @@ meow_cpu_usage() {
   [[ "$user" == <-> && "$idle" == <-> ]] || return
   idle_now=$(( idle + iowait ))
   total_now=$(( user + nice + system + idle + iowait + irq + softirq + steal ))
-  if meow_cache_get cpu_sample 0; then
+  if meow_cache_get cpu_sample -1; then
     total_prev="${REPLY%% *}"
     idle_prev="${REPLY##* }"
   fi
