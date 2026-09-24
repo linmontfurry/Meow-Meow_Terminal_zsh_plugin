@@ -24,7 +24,7 @@ local MEOW_FACE_GAP MEOW_ART_PAD MEOW_RAM_USED MEOW_RAM_TOTAL MEOW_RAM_PERCENT
 local MEOW_SWAP_USED MEOW_SWAP_TOTAL MEOW_SWAP_PERCENT MEOW_DISK_USED
 local MEOW_DISK_TOTAL MEOW_DISK_PERCENT MEM_PRESSURE RAM_USED RAM_TOTAL
 local MEOW_MAC_MODEL MEOW_MAC_CHIP MEOW_SYS_CORES MEOW_SYS_MEMBYTES
-local MEOW_SYS_BOOTSEC MEOW_SYS_SWAP
+local MEOW_SYS_BOOTSEC MEOW_SYS_SWAP MEOW_SYS_MEMFREE
 local -a WELCOMES CAT_ART_1 CAT_ART_2 MEOW_GPU_NAMES
 local -A MEOW_CACHE
 
@@ -284,13 +284,16 @@ meow_hostname() {
   [[ -n "$REPLY" ]] || REPLY="unknown-host"
 }
 
-# One sysctl process answers four questions. Every key here exists on every
-# macOS 10.x and later, so the reply lines cannot slip out of order.
+# One sysctl process answers five questions. The first four keys exist on every
+# macOS 10.x and later, so their reply lines cannot slip out of order. The last,
+# kern.memorystatus_level, is the figure memory_pressure prints as its "free
+# percentage"; it goes last so that a system without it (10.8 and older) just
+# returns one line fewer.
 meow_sysctl_batch() {
   local out
   local -a lines
-  MEOW_SYS_CORES=0 MEOW_SYS_MEMBYTES=0 MEOW_SYS_BOOTSEC=0 MEOW_SYS_SWAP=""
-  out="$(sysctl -n hw.logicalcpu hw.memsize kern.boottime vm.swapusage 2>/dev/null)"
+  MEOW_SYS_CORES=0 MEOW_SYS_MEMBYTES=0 MEOW_SYS_BOOTSEC=0 MEOW_SYS_SWAP="" MEOW_SYS_MEMFREE=""
+  out="$(sysctl -n hw.logicalcpu hw.memsize kern.boottime vm.swapusage kern.memorystatus_level 2>/dev/null)"
   lines=(${(f)out})
   (( ${#lines} >= 4 )) || return 1
   [[ "${lines[1]}" == <-> ]] && MEOW_SYS_CORES=${lines[1]}
@@ -301,6 +304,7 @@ meow_sysctl_batch() {
   boot="${boot//[[:space:]]/}"
   [[ "$boot" == <-> ]] && MEOW_SYS_BOOTSEC=$boot
   MEOW_SYS_SWAP="${lines[4]}"
+  [[ "${lines[5]-}" == <-> ]] && MEOW_SYS_MEMFREE=${lines[5]}
   return 0
 }
 
@@ -377,29 +381,26 @@ meow_battery() {
   done
 }
 
-# top -l 1 costs several hundred milliseconds. The number it reports is a live
-# sample, so it is refreshed rather than pinned -- but only once every
-# MEOW_SAMPLE_TTL seconds, which is what makes opening five tabs in a row cheap.
+# ps reports each process's CPU use as a decaying average over roughly the last
+# minute. Summed and divided by the core count, that is the machine's load as a
+# share of its capacity: the figure top's "CPU usage" line gives, from a process
+# that returns in milliseconds instead of top's several hundred. LC_ALL=C pins
+# the decimal point; under de_DE or fr_FR ps would print "12,5" and every value
+# would fail to parse.
 meow_cpu_usage_raw() {
-  local out line rest user sys
-  REPLY=0
-  out="$(top -l 1 -n 0 2>/dev/null)"
-  for line in ${(f)out}; do
-    [[ "$line" == *"CPU usage"* ]] || continue
-    rest="${line#*: }"
-    user="${rest%%\% user*}"
-    sys="${rest#*user, }"
-    sys="${sys%%\% sys*}"
-    user="${user//[[:space:]]/}"
-    sys="${sys//[[:space:]]/}"
-    [[ "$user" == <->.<-> || "$user" == <-> ]] || user=0
-    [[ "$sys" == <->.<-> || "$sys" == <-> ]] || sys=0
-    # An integer-typed assignment truncates; int() would need zsh/mathfunc.
-    local -i total
-    total=$(( user + sys ))
-    REPLY=$total
-    return
+  local out value
+  local -F sum=0
+  local -i cores=${MEOW_SYS_CORES:-0} pct
+  REPLY=""
+  out="$(LC_ALL=C ps -A -o %cpu= 2>/dev/null)" || return
+  for value in ${=out}; do
+    [[ "$value" == <->.<-> || "$value" == <-> ]] && (( sum += value ))
   done
+  (( cores > 0 )) || cores=1
+  pct=$(( sum / cores ))
+  (( pct > 100 )) && pct=100
+  (( pct < 0 )) && pct=0
+  REPLY=$pct
 }
 
 meow_cpu_usage() {
@@ -408,9 +409,17 @@ meow_cpu_usage() {
   (( REPLY > 100 )) && REPLY=100
 }
 
+# Used memory the way Activity Monitor and fastfetch count it: app memory
+# (anonymous pages the kernel cannot simply drop, i.e. minus purgeable ones),
+# plus wired, plus what the compressor occupies. The old sum of active + wired
+# + compressed - speculative also counted the file cache as used, so it read
+# well above both: 55% against fastfetch's 44% on the same CI runner.
+# "Anonymous pages" appeared in vm_stat with 10.9; older systems keep the old
+# formula.
 meow_memory() {
   local out line key value
   local -i page_size=4096 active=0 wired=0 compressed=0 speculative=0
+  local -i anonymous=-1 purgeable=0 used_pages
   MEOW_RAM_USED=0 MEOW_RAM_TOTAL=0 MEOW_RAM_PERCENT=0
   out="$(vm_stat 2>/dev/null)"
   for line in ${(f)out}; do
@@ -430,11 +439,18 @@ meow_memory() {
       ("Pages wired down")             wired=$value ;;
       ("Pages occupied by compressor") compressed=$value ;;
       ("Pages speculative")            speculative=$value ;;
+      ("Anonymous pages")              anonymous=$value ;;
+      ("Pages purgeable")              purgeable=$value ;;
     esac
   done
   local -i total_bytes=${MEOW_SYS_MEMBYTES:-0}
   MEOW_RAM_TOTAL=$(( total_bytes / 1048576 ))
-  MEOW_RAM_USED=$(( (active + wired + compressed - speculative) * page_size / 1048576 ))
+  if (( anonymous >= 0 )); then
+    used_pages=$(( anonymous - purgeable + wired + compressed ))
+  else
+    used_pages=$(( active + wired + compressed - speculative ))
+  fi
+  MEOW_RAM_USED=$(( used_pages * page_size / 1048576 ))
   (( MEOW_RAM_USED < 0 )) && MEOW_RAM_USED=0
   (( MEOW_RAM_TOTAL > 0 )) && MEOW_RAM_PERCENT=$(( MEOW_RAM_USED * 100 / MEOW_RAM_TOTAL ))
 }
@@ -442,6 +458,10 @@ meow_memory() {
 meow_memory_pressure() {
   local out line value
   REPLY=0
+  if [[ "${MEOW_SYS_MEMFREE-}" == <-> ]]; then
+    REPLY=$(( 100 - MEOW_SYS_MEMFREE ))
+    return
+  fi
   (( $+commands[memory_pressure] )) || return
   out="$(memory_pressure 2>/dev/null)"
   for line in ${(f)out}; do
@@ -480,7 +500,7 @@ meow_mb_from_size() {
   REPLY=$out
 }
 
-meow_disk() {
+meow_disk_probe() {
   local out line target
   local -a fields
   MEOW_DISK_USED=0 MEOW_DISK_TOTAL=1 MEOW_DISK_PERCENT=0
@@ -494,6 +514,21 @@ meow_disk() {
   MEOW_DISK_USED=$(( fields[3] / 1024 ))
   (( MEOW_DISK_TOTAL > 0 )) || MEOW_DISK_TOTAL=1
   MEOW_DISK_PERCENT=$(( MEOW_DISK_USED * 100 / MEOW_DISK_TOTAL ))
+}
+
+# Disk usage moves slowly, and df is the one process this banner cannot avoid,
+# so its answer is reused for MEOW_SAMPLE_TTL seconds like the other samples.
+meow_disk() {
+  local -a fields
+  if meow_cache_get disk $MEOW_SAMPLE_TTL; then
+    fields=(${=REPLY})
+    if (( ${#fields} == 3 )); then
+      MEOW_DISK_USED=${fields[1]} MEOW_DISK_TOTAL=${fields[2]} MEOW_DISK_PERCENT=${fields[3]}
+      return
+    fi
+  fi
+  meow_disk_probe
+  (( MEOW_DISK_TOTAL > 1 )) && meow_cache_set disk "$MEOW_DISK_USED $MEOW_DISK_TOTAL $MEOW_DISK_PERCENT"
 }
 
 meow_primary_ip() {

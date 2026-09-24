@@ -429,7 +429,7 @@ meow_memory() {
 
 # -P -k is the POSIX spelling: -m is a GNU extension BusyBox may not carry, and
 # -P keeps long device names from wrapping onto a second line.
-meow_disk() {
+meow_disk_probe() {
   local out line
   local -a fields
   MEOW_DISK_USED=0 MEOW_DISK_TOTAL=1 MEOW_DISK_PERCENT=0
@@ -443,6 +443,21 @@ meow_disk() {
   MEOW_DISK_USED=$(( fields[3] / 1024 ))
   (( MEOW_DISK_TOTAL > 0 )) || MEOW_DISK_TOTAL=1
   MEOW_DISK_PERCENT=$(( MEOW_DISK_USED * 100 / MEOW_DISK_TOTAL ))
+}
+
+# Disk usage moves slowly, and df is the one process this banner cannot avoid,
+# so its answer is reused for MEOW_SAMPLE_TTL seconds like the other samples.
+meow_disk() {
+  local -a fields
+  if meow_cache_get disk $MEOW_SAMPLE_TTL; then
+    fields=(${=REPLY})
+    if (( ${#fields} == 3 )); then
+      MEOW_DISK_USED=${fields[1]} MEOW_DISK_TOTAL=${fields[2]} MEOW_DISK_PERCENT=${fields[3]}
+      return
+    fi
+  fi
+  meow_disk_probe
+  (( MEOW_DISK_TOTAL > 1 )) && meow_cache_set disk "$MEOW_DISK_USED $MEOW_DISK_TOTAL $MEOW_DISK_PERCENT"
 }
 
 # Two readings of /proc/stat are needed for a real percentage; the previous one
