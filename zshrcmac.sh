@@ -397,7 +397,7 @@ meow_cpu_usage_raw() {
     [[ "$value" == <->.<-> || "$value" == <-> ]] && (( sum += value ))
   done
   (( cores > 0 )) || cores=1
-  pct=$(( sum / cores ))
+  pct=$(( sum / cores + 0.5 ))
   (( pct > 100 )) && pct=100
   (( pct < 0 )) && pct=0
   REPLY=$pct
@@ -409,6 +409,9 @@ meow_cpu_usage() {
   (( REPLY > 100 )) && REPLY=100
 }
 
+# Percentages are rounded, not truncated: (200a + b) / 2b is round-half-up in
+# integer arithmetic. Truncating showed 40% where fastfetch, and this banner on
+# Windows, showed 41-42% for the same memory.
 # Used memory the way Activity Monitor and fastfetch count it: app memory
 # (anonymous pages the kernel cannot simply drop, i.e. minus purgeable ones),
 # plus wired, plus what the compressor occupies. The old sum of active + wired
@@ -452,7 +455,7 @@ meow_memory() {
   fi
   MEOW_RAM_USED=$(( used_pages * page_size / 1048576 ))
   (( MEOW_RAM_USED < 0 )) && MEOW_RAM_USED=0
-  (( MEOW_RAM_TOTAL > 0 )) && MEOW_RAM_PERCENT=$(( MEOW_RAM_USED * 100 / MEOW_RAM_TOTAL ))
+  (( MEOW_RAM_TOTAL > 0 )) && MEOW_RAM_PERCENT=$(( (200 * MEOW_RAM_USED + MEOW_RAM_TOTAL) / (2 * MEOW_RAM_TOTAL) ))
 }
 
 meow_memory_pressure() {
@@ -483,7 +486,7 @@ meow_swap() {
   used="${raw#*used = }";   used="${used%% *}"
   meow_mb_from_size "$total"; MEOW_SWAP_TOTAL=$REPLY
   meow_mb_from_size "$used";  MEOW_SWAP_USED=$REPLY
-  (( MEOW_SWAP_TOTAL > 0 )) && MEOW_SWAP_PERCENT=$(( MEOW_SWAP_USED * 100 / MEOW_SWAP_TOTAL ))
+  (( MEOW_SWAP_TOTAL > 0 )) && MEOW_SWAP_PERCENT=$(( (200 * MEOW_SWAP_USED + MEOW_SWAP_TOTAL) / (2 * MEOW_SWAP_TOTAL) ))
 }
 
 meow_mb_from_size() {
@@ -513,7 +516,7 @@ meow_disk_probe() {
   MEOW_DISK_TOTAL=$(( fields[2] / 1024 ))
   MEOW_DISK_USED=$(( fields[3] / 1024 ))
   (( MEOW_DISK_TOTAL > 0 )) || MEOW_DISK_TOTAL=1
-  MEOW_DISK_PERCENT=$(( MEOW_DISK_USED * 100 / MEOW_DISK_TOTAL ))
+  MEOW_DISK_PERCENT=$(( (200 * MEOW_DISK_USED + MEOW_DISK_TOTAL) / (2 * MEOW_DISK_TOTAL) ))
 }
 
 # Disk usage moves slowly, and df is the one process this banner cannot avoid,

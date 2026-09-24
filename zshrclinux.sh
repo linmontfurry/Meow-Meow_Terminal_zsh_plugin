@@ -389,6 +389,9 @@ meow_battery() {
 }
 
 # free(1) is procps and its output differs on BusyBox, so read the kernel file.
+# Percentages are rounded, not truncated: (200a + b) / 2b is round-half-up in
+# integer arithmetic. Truncating showed 40% where fastfetch, and this banner on
+# Windows, showed 41-42% for the same memory.
 meow_memory() {
   local key value
   local -i total=0 available=0 free=0 buffers=0 cached=0 reclaimable=0
@@ -421,10 +424,10 @@ meow_memory() {
   (( used < 0 )) && used=0
   MEOW_RAM_TOTAL=$(( total / 1024 ))
   MEOW_RAM_USED=$(( used / 1024 ))
-  (( MEOW_RAM_TOTAL > 0 )) && MEOW_RAM_PERCENT=$(( MEOW_RAM_USED * 100 / MEOW_RAM_TOTAL ))
+  (( MEOW_RAM_TOTAL > 0 )) && MEOW_RAM_PERCENT=$(( (200 * MEOW_RAM_USED + MEOW_RAM_TOTAL) / (2 * MEOW_RAM_TOTAL) ))
   MEOW_SWAP_TOTAL=$(( swap_total / 1024 ))
   MEOW_SWAP_USED=$(( (swap_total - swap_free) / 1024 ))
-  (( MEOW_SWAP_TOTAL > 0 )) && MEOW_SWAP_PERCENT=$(( MEOW_SWAP_USED * 100 / MEOW_SWAP_TOTAL ))
+  (( MEOW_SWAP_TOTAL > 0 )) && MEOW_SWAP_PERCENT=$(( (200 * MEOW_SWAP_USED + MEOW_SWAP_TOTAL) / (2 * MEOW_SWAP_TOTAL) ))
 }
 
 # -P -k is the POSIX spelling: -m is a GNU extension BusyBox may not carry, and
@@ -442,7 +445,7 @@ meow_disk_probe() {
   MEOW_DISK_TOTAL=$(( fields[2] / 1024 ))
   MEOW_DISK_USED=$(( fields[3] / 1024 ))
   (( MEOW_DISK_TOTAL > 0 )) || MEOW_DISK_TOTAL=1
-  MEOW_DISK_PERCENT=$(( MEOW_DISK_USED * 100 / MEOW_DISK_TOTAL ))
+  MEOW_DISK_PERCENT=$(( (200 * MEOW_DISK_USED + MEOW_DISK_TOTAL) / (2 * MEOW_DISK_TOTAL) ))
 }
 
 # Disk usage moves slowly, and df is the one process this banner cannot avoid,
@@ -479,9 +482,9 @@ meow_cpu_usage() {
   if (( total_prev > 0 && total_now > total_prev )); then
     total_delta=$(( total_now - total_prev ))
     idle_delta=$(( idle_now - idle_prev ))
-    usage=$(( (100 * (total_delta - idle_delta)) / total_delta ))
+    usage=$(( (200 * (total_delta - idle_delta) + total_delta) / (2 * total_delta) ))
   elif (( total_now > 0 )); then
-    usage=$(( (100 * (total_now - idle_now)) / total_now ))
+    usage=$(( (200 * (total_now - idle_now) + total_now) / (2 * total_now) ))
   fi
   (( usage < 0 )) && usage=0
   (( usage > 100 )) && usage=100
