@@ -101,8 +101,9 @@ meow_cache_get() {
   return 0
 }
 
+# One record per line in the file, so a value never carries a newline.
 meow_cache_set() {
-  MEOW_CACHE[$1]="${MEOW_NOW} $2"
+  MEOW_CACHE[$1]="${MEOW_NOW} ${2//$'\n'/ }"
   MEOW_CACHE_DIRTY=1
 }
 
@@ -387,16 +388,21 @@ meow_mac_hardware() {
   fi
 }
 
+# Non-zero only when system_profiler itself gave nothing. A reply with no
+# chipset in it is an answer: Apple's virtual machines, the CI runner among
+# them, list a display but no GPU.
 meow_gpu_names() {
   local out line
   typeset -ga MEOW_GPU_NAMES
   MEOW_GPU_NAMES=()
   out="$(system_profiler SPDisplaysDataType 2>/dev/null)"
+  [[ -n "$out" ]] || return 1
   for line in ${(f)out}; do
     [[ "$line" == *"Chipset Model:"* ]] || continue
     meow_trim "${line#*:}"
     [[ -n "$REPLY" ]] && MEOW_GPU_NAMES+=("$REPLY")
   done
+  return 0
 }
 
 meow_battery() {
@@ -634,7 +640,6 @@ ARCH="$REPLY"
 if meow_cache_get mac_model $MEOW_STATIC_TTL; then
   MODEL_NAME="$REPLY"
   meow_cache_get mac_chip $MEOW_STATIC_TTL && CHIP="$REPLY"
-  meow_cache_get mac_gpus $MEOW_STATIC_TTL && MEOW_GPU_NAMES=("${(@f)REPLY}")
 fi
 if [[ -z "${MODEL_NAME:-}" || -z "${CHIP:-}" ]]; then
   meow_mac_hardware
@@ -643,9 +648,14 @@ if [[ -z "${MODEL_NAME:-}" || -z "${CHIP:-}" ]]; then
   [[ -n "$MODEL_NAME" ]] && meow_cache_set mac_model "$MODEL_NAME"
   [[ -n "$CHIP" ]] && meow_cache_set mac_chip "$CHIP"
 fi
-if (( ${#MEOW_GPU_NAMES} == 0 )); then
-  meow_gpu_names
-  (( ${#MEOW_GPU_NAMES} > 0 )) && meow_cache_set mac_gpus "${(pj:\n:)MEOW_GPU_NAMES}"
+# Cached even when empty: a Mac that lists no chipset used to re-run
+# system_profiler on every shell. Names are joined with "|", because the cache
+# holds one record per line; the newline they were joined with before cut the
+# second GPU of a dual-GPU MacBook Pro off every shell after the first.
+if meow_cache_get mac_gpu_list $MEOW_STATIC_TTL; then
+  [[ -n "$REPLY" ]] && MEOW_GPU_NAMES=("${(@s:|:)REPLY}")
+elif meow_gpu_names; then
+  meow_cache_set mac_gpu_list "${(j:|:)MEOW_GPU_NAMES}"
 fi
 [[ -n "$MODEL_NAME" ]] || MODEL_NAME="Mac"
 [[ -n "$CHIP" ]] || CHIP="Unknown CPU"

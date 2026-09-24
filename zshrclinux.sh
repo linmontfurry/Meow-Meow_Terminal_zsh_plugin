@@ -99,8 +99,9 @@ meow_cache_get() {
   return 0
 }
 
+# One record per line in the file, so a value never carries a newline.
 meow_cache_set() {
-  MEOW_CACHE[$1]="${MEOW_NOW} $2"
+  MEOW_CACHE[$1]="${MEOW_NOW} ${2//$'\n'/ }"
   MEOW_CACHE_DIRTY=1
 }
 
