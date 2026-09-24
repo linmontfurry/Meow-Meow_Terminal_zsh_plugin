@@ -50,3 +50,22 @@ jobs:
           Set-ExecutionPolicy Bypass -Scope Process -Force
           .\meow.ps1 > output.txt
           Get-Content output.txt
+
+      - name: Diagnostics (temporary, will be reverted)
+        shell: pwsh
+        run: |
+          Write-Host '--- cache file after one run'
+          Get-Content "$env:LOCALAPPDATA\meow-terminal\facts"
+          Write-Host '--- GPU Engine instances (first 6)'
+          (Get-Counter '\GPU Engine(*)\Utilization Percentage').CounterSamples |
+              Select-Object -First 6 InstanceName, CookedValue | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+          Write-Host '--- Win32_VideoController'
+          Get-CimInstance Win32_VideoController | Select-Object Name, AdapterRAM, PNPDeviceID | Format-List | Out-String -Width 200 | Write-Host
+          Write-Host '--- display devices and their LUID property'
+          foreach ($d in Get-CimInstance Win32_PnPEntity -Filter "ClassGuid = '{4d36e968-e325-11ce-bfc1-08002be10318}'") {
+              $r = Invoke-CimMethod -InputObject $d -MethodName GetDeviceProperties -Arguments @{ devicePropertyKeys = [string[]]@('{60b193cb-5276-4d0f-96fc-f173abad3ec6} 2') }
+              $p = @($r.deviceProperties)[0]
+              Write-Host ('{0} | {1} | type={2} data={3}' -f $d.Name, $d.DeviceID, $p.Type, $p.Data)
+          }
+          Write-Host '--- warm run timing (3 runs)'
+          1..3 | ForEach-Object { '{0:N0} ms' -f (Measure-Command { .\meow.ps1 | Out-Null }).TotalMilliseconds }
