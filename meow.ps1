@@ -151,12 +151,12 @@ function Format-BytesToMB {
     return [math]::Round($Bytes / 1MB)
 }
 
+# "1 core", "8 cores", "16 threads"
 function Format-CpuCoreCount {
-    param([int]$Cores = 1)
+    param([int]$Count, [string]$Unit = 'cores')
 
-    if ($Cores -lt 1) { $Cores = 1 }
-    if ($Cores -eq 1) { return '1 core' }
-    return "$Cores cores"
+    if ($Count -eq 1) { $Unit = $Unit.TrimEnd('s') }
+    return "$Count $Unit"
 }
 
 function Format-Uptime {
@@ -294,6 +294,12 @@ function Get-BatteryPercentage {
 # own: on three CI runs, on a runner busy running this very script, it read 0,
 # 26 and 0.
 #
+# The CPU figure is % Processor Utility, the counter Task Manager has shown since
+# Windows 8 (KB 3200459). It measures work done against the CPU's nominal
+# clock, so a core busy all the time at half speed reads 50% where % Processor
+# Time, used before, read 100%. Turbo can take it past 100%; the gauge stops at
+# 100. Should the counter be missing, % Processor Time is the fallback.
+#
 # A GPU's figure is its busiest engine, each engine being the sum over the
 # processes using it: how Task Manager computes it. Every engine used to be
 # added together, a video decode on top of the 3D work beside it and the copy
@@ -311,28 +317,38 @@ function Get-UsageSample {
     $hit = Get-MeowCache -Key 'usage' -MaxAge $script:MeowSampleTtl
     if ($null -ne $hit) { $script:MeowUsage = $hit; return $hit }
 
-    $cpuPath = '\Processor(_Total)\% Processor Time'
+    $cpuPaths = '\Processor Information(_Total)\% Processor Utility', '\Processor(_Total)\% Processor Time'
     $gpuPath = '\GPU Engine(*)\Utilization Percentage'
+    $wantGpu = (Get-MeowCache -Key 'has_gpu_counters' -MaxAge $script:MeowStaticTtl) -ne '0'
     $samples = $null
-    if ((Get-MeowCache -Key 'has_gpu_counters' -MaxAge $script:MeowStaticTtl) -ne '0') {
-        try {
-            $samples = (Get-Counter -Counter $cpuPath, $gpuPath -ErrorAction Stop).CounterSamples
-            Set-MeowCache -Key 'has_gpu_counters' -Value '1'
-        } catch {
-            # No GPU engine counters here (older Windows, some VMs). Remember
-            # that, so later shells ask for the CPU alone straight away.
-            Set-MeowCache -Key 'has_gpu_counters' -Value '0'
+    # A missing counter fails at once, before any waiting, so trying the next
+    # one costs nothing. Only the call that succeeds spends the second.
+    foreach ($cpuPath in $cpuPaths) {
+        if ($wantGpu) {
+            try {
+                $samples = (Get-Counter -Counter $cpuPath, $gpuPath -ErrorAction Stop).CounterSamples
+                Set-MeowCache -Key 'has_gpu_counters' -Value '1'
+                break
+            } catch {
+            }
         }
-    }
-    if (-not $samples) {
-        try { $samples = (Get-Counter -Counter $cpuPath -ErrorAction Stop).CounterSamples } catch { }
+        try {
+            $samples = (Get-Counter -Counter $cpuPath -ErrorAction Stop).CounterSamples
+        } catch {
+            continue
+        }
+        # The CPU counter works on its own, so the GPU engine counters are what
+        # is missing (older Windows, some VMs). Remember that, so later shells
+        # ask for the CPU alone straight away.
+        if ($wantGpu) { Set-MeowCache -Key 'has_gpu_counters' -Value '0' }
+        break
     }
 
     $cpu = ''
     $engineLoad = @{}
     foreach ($sample in @($samples)) {
         if (-not $sample) { continue }
-        if ($sample.Path -like '*\processor(_total)\*') {
+        if ($sample.Path -like '*\processor*(_total)\*') {
             $cpu = [string][math]::Min(100, [math]::Max(0, [int][math]::Round($sample.CookedValue)))
             continue
         }
@@ -360,10 +376,12 @@ function Get-UsageSample {
     return $script:MeowUsage
 }
 
+# $null when no counter could be read, so the banner says N/A instead of a
+# made-up 0%.
 function Get-CpuUsage {
     $cpu = (Get-UsageSample).Split('|')[0]
     if ($cpu -match '^\d+$') { return [int]$cpu }
-    return 0
+    return $null
 }
 
 # Takes the Win32_OperatingSystem instance the caller already fetched, instead
@@ -569,23 +587,33 @@ $modelName = Get-MeowCached -Key 'model' -Ttl $MeowStaticTtl -Compute {
 }
 if (-not $modelName) { $modelName = 'Windows Machine' }
 
-$chip = Get-MeowCached -Key 'chip' -Ttl $MeowStaticTtl -Compute {
+# The CPU name and its physical core count come from one Win32_Processor query,
+# cached with the other hardware facts. NumberOfCores is per socket, so the
+# sockets are added up. [Environment]::ProcessorCount, shown before, counts
+# hardware threads: twice the cores on a CPU with SMT.
+$chip = Get-MeowCache -Key 'chip' -MaxAge $MeowStaticTtl
+$physicalCores = Get-MeowCache -Key 'cores' -MaxAge $MeowStaticTtl
+if ($null -eq $chip -or $null -eq $physicalCores) {
     try {
-        $p = Get-CimInstance Win32_Processor -Property Name -ErrorAction Stop |
-                 Select-Object -ExpandProperty Name -First 1
-        if ($p) { $p.Trim() } else { '' }
-    } catch { '' }
+        $processors = @(Get-CimInstance Win32_Processor -Property Name, NumberOfCores -ErrorAction Stop)
+        # Win32_Processor pads the name with trailing blanks ("AMD EPYC 7763 64-Core
+        # Processor" plus sixteen spaces), which shoved "(AMD64)" far off to the right.
+        $name = ([string]$processors[0].Name).Trim()
+        $cores = [int]($processors | Measure-Object -Property NumberOfCores -Sum).Sum
+        if ($name) { $chip = $name; Set-MeowCache -Key 'chip' -Value $name }
+        if ($cores -gt 0) { $physicalCores = [string]$cores; Set-MeowCache -Key 'cores' -Value $physicalCores }
+    } catch {
+    }
 }
-# Win32_Processor pads the name with trailing blanks ("AMD EPYC 7763 64-Core
-# Processor" plus sixteen spaces), which shoved "(AMD64)" far off to the right.
 $chip = ([string]$chip).Trim()
 if (-not $chip) { $chip = 'Unknown CPU' }
 
-# .NET already knows this; Win32_ComputerSystem and Win32_Processor were being
-# queried purely to count logical processors.
-$cpuCores = [Environment]::ProcessorCount
-if ($cpuCores -lt 1) { $cpuCores = 1 }
-$cpuCoreText = Format-CpuCoreCount $cpuCores
+$cpuCoreText = ''
+if ([string]$physicalCores -match '^[0-9]+$' -and [int]$physicalCores -gt 0) {
+    $cpuCoreText = '({0})' -f (Format-CpuCoreCount ([int]$physicalCores) 'cores')
+} elseif ([Environment]::ProcessorCount -gt 0) {
+    $cpuCoreText = '({0})' -f (Format-CpuCoreCount ([Environment]::ProcessorCount) 'threads')
+}
 
 $ipAddr = Get-PrimaryIPv4
 $uptime = Format-Uptime $operatingSystem.LastBootUpTime
@@ -821,7 +849,11 @@ $infoLines += "${BLUE}${modelName}${RESET}"
 $infoLines += "${DIM}CPU:${RESET} ${YELLOW}${chip}${RESET} ${DIM}(${arch})${RESET}"
 $infoLines += "${DIM}User:${RESET} ${LIGHT_GREEN}$($env:USERNAME)${RESET}@${LIGHT_GREEN}${hostName}${RESET}"
 $infoLines += "${DIM}========================================${RESET}"
-Add-MeowGauge -Label 'CPU Usage:' -Percent $cpuUsage -Detail "(${cpuCoreText})"
+if ($null -ne $cpuUsage) {
+    Add-MeowGauge -Label 'CPU Usage:' -Percent $cpuUsage -Detail $cpuCoreText
+} else {
+    Add-MeowRow -Label 'CPU Usage:' -Value ("N/A $cpuCoreText").TrimEnd()
+}
 Add-MeowGauge -Label 'RAM Usage:' -Percent $memory.Percent -Detail "($($memory.UsedMB)/$($memory.TotalMB) MB)"
 
 if ($swap.TotalMB -gt 0) {

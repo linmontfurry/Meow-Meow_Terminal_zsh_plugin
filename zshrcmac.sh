@@ -24,7 +24,7 @@ local MEOW_FACE_GAP MEOW_ART_PAD MEOW_RAM_USED MEOW_RAM_TOTAL MEOW_RAM_PERCENT
 local MEOW_SWAP_USED MEOW_SWAP_TOTAL MEOW_SWAP_PERCENT MEOW_DISK_USED
 local MEOW_DISK_TOTAL MEOW_DISK_PERCENT MEM_PRESSURE RAM_USED RAM_TOTAL
 local MEOW_MAC_MODEL MEOW_MAC_CHIP MEOW_SYS_CORES MEOW_SYS_MEMBYTES
-local MEOW_SYS_BOOTSEC MEOW_SYS_SWAP MEOW_SYS_MEMFREE
+local MEOW_SYS_BOOTSEC MEOW_SYS_SWAP MEOW_SYS_MEMFREE MEOW_SYS_PCORES MEOW_CPU_UNIT
 local -a WELCOMES CAT_ART_1 CAT_ART_2 MEOW_GPU_NAMES
 local -A MEOW_CACHE
 
@@ -303,40 +303,53 @@ meow_hostname() {
   [[ -n "$REPLY" ]] || REPLY="unknown-host"
 }
 
-# One sysctl process answers five questions. The first four keys exist on every
+# One sysctl process answers six questions. The first five keys exist on every
 # macOS 10.x and later, so their reply lines cannot slip out of order. The last,
 # kern.memorystatus_level, is the figure memory_pressure prints as its "free
 # percentage"; it goes last so that a system without it (10.8 and older) just
 # returns one line fewer.
+#
+# hw.logicalcpu counts hardware threads and is what CPU usage is divided by;
+# hw.physicalcpu counts cores and is what the banner shows.
 meow_sysctl_batch() {
   local out
   local -a lines
-  MEOW_SYS_CORES=0 MEOW_SYS_MEMBYTES=0 MEOW_SYS_BOOTSEC=0 MEOW_SYS_SWAP="" MEOW_SYS_MEMFREE=""
-  out="$(sysctl -n hw.logicalcpu hw.memsize kern.boottime vm.swapusage kern.memorystatus_level 2>/dev/null)"
+  MEOW_SYS_CORES=0 MEOW_SYS_PCORES=0 MEOW_SYS_MEMBYTES=0 MEOW_SYS_BOOTSEC=0
+  MEOW_SYS_SWAP="" MEOW_SYS_MEMFREE=""
+  out="$(sysctl -n hw.logicalcpu hw.physicalcpu hw.memsize kern.boottime vm.swapusage kern.memorystatus_level 2>/dev/null)"
   lines=(${(f)out})
-  (( ${#lines} >= 4 )) || return 1
+  (( ${#lines} >= 5 )) || return 1
   [[ "${lines[1]}" == <-> ]] && MEOW_SYS_CORES=${lines[1]}
-  [[ "${lines[2]}" == <-> ]] && MEOW_SYS_MEMBYTES=${lines[2]}
+  [[ "${lines[2]}" == <-> ]] && MEOW_SYS_PCORES=${lines[2]}
+  [[ "${lines[3]}" == <-> ]] && MEOW_SYS_MEMBYTES=${lines[3]}
   # "{ sec = 1712345678, usec = 0 } Fri Apr  5 ..."
-  local boot="${lines[3]#*sec = }"
+  local boot="${lines[4]#*sec = }"
   boot="${boot%%,*}"
   boot="${boot//[[:space:]]/}"
   [[ "$boot" == <-> ]] && MEOW_SYS_BOOTSEC=$boot
-  MEOW_SYS_SWAP="${lines[4]}"
-  [[ "${lines[5]-}" == <-> ]] && MEOW_SYS_MEMFREE=${lines[5]}
+  MEOW_SYS_SWAP="${lines[5]}"
+  [[ "${lines[6]-}" == <-> ]] && MEOW_SYS_MEMFREE=${lines[6]}
   return 0
 }
 
+# Physical cores, in REPLY; MEOW_CPU_UNIT says "cores", or "threads" in the
+# unlikely case only the logical count could be read.
 meow_cpu_cores() {
+  MEOW_CPU_UNIT=cores
+  REPLY=${MEOW_SYS_PCORES:-0}
+  [[ "$REPLY" == <-> && $REPLY -gt 0 ]] || REPLY="$(sysctl -n hw.physicalcpu 2>/dev/null)"
+  [[ "$REPLY" == <-> && $REPLY -gt 0 ]] && return
+  MEOW_CPU_UNIT=threads
   REPLY=${MEOW_SYS_CORES:-0}
-  [[ "$REPLY" == <-> && $REPLY -gt 0 ]] || REPLY="$(sysctl -n hw.ncpu 2>/dev/null)"
   [[ "$REPLY" == <-> && $REPLY -gt 0 ]] || REPLY=""
 }
 
+# meow_format_cores <count> [unit]  ->  "1 core", "8 cores", "16 threads"
 meow_format_cores() {
-  local -i cores=${1:-1}
-  (( cores > 0 )) || cores=1
-  if (( cores == 1 )); then REPLY="1 core"; else REPLY="${cores} cores"; fi
+  local -i count=${1:-0}
+  local unit="${2:-cores}"
+  (( count == 1 )) && unit="${unit%s}"
+  REPLY="$count $unit"
 }
 
 # kern.boottime is an integer from the kernel. The old code read "who -b" and
@@ -400,19 +413,28 @@ meow_battery() {
   done
 }
 
-# ps reports each process's CPU use as a decaying average over roughly the last
-# minute. Summed and divided by the core count, that is the machine's load as a
-# share of its capacity: the figure top's "CPU usage" line gives, from a process
-# that returns in milliseconds instead of top's several hundred. LC_ALL=C pins
-# the decimal point; under de_DE or fr_FR ps would print "12,5" and every value
-# would fail to parse.
+# CPU usage right now. ps's %cpu on macOS is the kernel scheduler's figure for
+# each thread: XNU folds a thread's run time in every 125 ms and decays it by
+# 5/8 each time (osfmk/kern/priority.c), so it is a moving average over about
+# the last half second, not the minute the BSD manual describes. Summed and
+# divided by the logical CPU count, that is the machine's load at this moment,
+# from one process that returns in milliseconds.
+#
+# This shell is left out. Its last half second is spent starting up (oh-my-zsh,
+# plugins, this banner), and that would otherwise be reported as load on the
+# machine.
+#
+# LC_ALL=C pins the decimal point; under de_DE or fr_FR ps would print "12,5"
+# and every value would fail to parse.
 meow_cpu_usage_raw() {
-  local out value
+  local out pid value
   local -F sum=0
   local -i cores=${MEOW_SYS_CORES:-0} pct
   REPLY=""
-  out="$(LC_ALL=C ps -A -o %cpu= 2>/dev/null)" || return
-  for value in ${=out}; do
+  out="$(LC_ALL=C ps -A -o pid= -o %cpu= 2>/dev/null)" || return
+  [[ -n "$out" ]] || return
+  for pid value in ${=out}; do
+    [[ "$pid" == "$$" ]] && continue
     [[ "$value" == <->.<-> || "$value" == <-> ]] && (( sum += value ))
   done
   (( cores > 0 )) || cores=1
@@ -422,10 +444,10 @@ meow_cpu_usage_raw() {
   REPLY=$pct
 }
 
+# Empty when ps gave nothing, so the banner says N/A instead of a made-up 0%.
 meow_cpu_usage() {
   meow_cached cpu_usage $MEOW_SAMPLE_TTL meow_cpu_usage_raw
-  [[ "$REPLY" == <-> ]] || REPLY=0
-  (( REPLY > 100 )) && REPLY=100
+  [[ "$REPLY" == <-> ]] || REPLY=""
 }
 
 # Percentages are rounded, not truncated: (200a + b) / 2b is round-half-up in
@@ -630,8 +652,10 @@ fi
 
 meow_cpu_cores
 CPU_CORES="$REPLY"
-[[ "$CPU_CORES" == <-> ]] || CPU_CORES=1
-meow_format_cores "$CPU_CORES"; CPU_CORE_TEXT="$REPLY"
+CPU_CORE_TEXT=""
+if [[ "$CPU_CORES" == <-> ]] && (( CPU_CORES > 0 )); then
+  meow_format_cores "$CPU_CORES" "$MEOW_CPU_UNIT"; CPU_CORE_TEXT="($REPLY)"
+fi
 
 meow_primary_ip; IP_ADDR="$REPLY"
 meow_uptime;     UP_TIME="$REPLY"
@@ -875,7 +899,11 @@ INFO_LINES+=("${BLUE}${MODEL_NAME}${RESET}")
 INFO_LINES+=("${DIM}CPU:${RESET} ${YELLOW}${CHIP}${RESET} ${DIM}(${ARCH})${RESET}")
 INFO_LINES+=("${DIM}User:${RESET} ${LIGHT_GREEN}${USER}${RESET}@${LIGHT_GREEN}${HOST_NAME}${RESET}")
 INFO_LINES+=("${DIM}========================================${RESET}")
-meow_gauge "CPU Usage:"       "$CPU_USAGE"    "(${CPU_CORE_TEXT})"
+if [[ -n "$CPU_USAGE" ]]; then
+  meow_gauge "CPU Usage:" "$CPU_USAGE" "$CPU_CORE_TEXT"
+else
+  meow_row "CPU Usage:" "N/A${CPU_CORE_TEXT:+ $CPU_CORE_TEXT}"
+fi
 meow_gauge "RAM Usage:"       "$RAM_PERCENT"  "(${VM_USED}/${VM_TOTAL} MB)"
 meow_gauge "Disk Usage:"      "$DISK_PERCENT" "(${DISK_USED}/${DISK_TOTAL} MB)"
 meow_gauge "Memory Pressure:" "$MEM_PRESSURE"

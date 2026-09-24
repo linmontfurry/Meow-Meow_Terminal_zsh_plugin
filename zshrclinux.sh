@@ -22,11 +22,12 @@ local PINK CYAN YELLOW MAGENTA GREEN ORANGE BLUE DIM LIGHT_GREEN RED MEOW_NOW
 local MEOW_CACHE_DIR MEOW_CACHE_FILE MEOW_CACHE_DIRTY MEOW_I MEOW_GAP
 local MEOW_FACE_GAP MEOW_ART_PAD MEOW_RAM_USED MEOW_RAM_TOTAL MEOW_RAM_PERCENT
 local MEOW_SWAP_USED MEOW_SWAP_TOTAL MEOW_SWAP_PERCENT MEOW_DISK_USED
-local MEOW_DISK_TOTAL MEOW_DISK_PERCENT
+local MEOW_DISK_TOTAL MEOW_DISK_PERCENT MEOW_CPU_UNIT
 local -a WELCOMES CAT_ART_1 CAT_ART_2 MEOW_GPU_UTILS
 local -A MEOW_CACHE
 
 zmodload zsh/datetime 2>/dev/null
+zmodload zsh/zselect 2>/dev/null
 
 RESET="\033[0m"
 PINK="\033[1;35m"
@@ -331,38 +332,69 @@ meow_cpu_model() {
   fi
 }
 
+# Physical cores. Each online CPU's thread_siblings_list names the logical
+# CPUs that share its core ("0,6" with SMT, "3" without), so the number of
+# distinct lists is the number of cores. That holds on big.LITTLE and hybrid
+# parts too, where core_id starts over in every cluster and cannot be counted
+# on its own. Offline CPUs are left out, as in the /proc/stat totals.
+#
+# Answers in REPLY, and MEOW_CPU_UNIT says what it counts: "cores", or
+# "threads" when the kernel exposes no topology at all and only the logical
+# CPUs can be counted.
 meow_cpu_cores() {
-  local raw part lo hi
-  local -i total=0
-  # "online", not "present": present also lists CPUs that are switched off
-  # (hot-unplugged cores, idle big.LITTLE clusters, spare vCPUs), which neither
-  # run anything nor appear in the /proc/stat totals the usage is taken from.
+  local raw part siblings key value phys=""
+  local -i lo hi n logical=0 procs=0
+  local -A cores
+  REPLY="" MEOW_CPU_UNIT=cores
   if [[ -r /sys/devices/system/cpu/online ]]; then
     raw="$(</sys/devices/system/cpu/online)"
     raw="${raw//[[:space:]]/}"
     for part in ${(s:,:)raw}; do
-      if [[ "$part" == *-* ]]; then
-        lo="${part%%-*}"; hi="${part##*-}"
-        [[ "$lo" == <-> && "$hi" == <-> ]] && (( total += hi - lo + 1 ))
+      if [[ "$part" == <->-<-> ]]; then
+        lo=${part%%-*} hi=${part##*-}
       elif [[ "$part" == <-> ]]; then
-        (( total++ ))
+        lo=$part hi=$part
+      else
+        continue
       fi
+      for (( n = lo; n <= hi; n++ )); do
+        (( logical++ ))
+        for key in thread_siblings_list core_cpus_list; do
+          [[ -r /sys/devices/system/cpu/cpu$n/topology/$key ]] || continue
+          siblings="$(</sys/devices/system/cpu/cpu$n/topology/$key)"
+          [[ -n "$siblings" ]] && cores[$siblings]=1
+          break
+        done
+      done
     done
   fi
-  if (( total <= 0 )) && [[ -r /proc/cpuinfo ]]; then
-    local key value
+  # No sysfs topology (some containers): on x86, /proc/cpuinfo still gives
+  # every logical CPU a physical id and a core id.
+  if (( ${#cores} == 0 )) && [[ -r /proc/cpuinfo ]]; then
     while IFS=: read -r key value; do
       key="${key//[[:space:]]/}"
-      [[ "$key" == processor ]] && (( total++ ))
+      value="${value//[[:space:]]/}"
+      case "$key" in
+        (processor)  (( procs++ )); phys="" ;;
+        (physicalid) phys="$value" ;;
+        (coreid)     [[ -n "$phys" ]] && cores[$phys:$value]=1 ;;
+      esac
     done < /proc/cpuinfo
+    (( logical > 0 )) || logical=$procs
   fi
-  if (( total > 0 )); then REPLY=$total; else REPLY=""; fi
+  if (( ${#cores} > 0 )); then
+    REPLY=${#cores}
+  elif (( logical > 0 )); then
+    REPLY=$logical MEOW_CPU_UNIT=threads
+  fi
 }
 
+# meow_format_cores <count> [unit]  ->  "1 core", "8 cores", "16 threads"
 meow_format_cores() {
-  local -i cores=${1:-1}
-  (( cores > 0 )) || cores=1
-  if (( cores == 1 )); then REPLY="1 core"; else REPLY="${cores} cores"; fi
+  local -i count=${1:-0}
+  local unit="${2:-cores}"
+  (( count == 1 )) && unit="${unit%s}"
+  REPLY="$count $unit"
 }
 
 meow_uptime() {
@@ -499,32 +531,50 @@ meow_disk() {
   (( MEOW_DISK_TOTAL > 1 )) && meow_cache_set disk "$MEOW_DISK_USED $MEOW_DISK_TOTAL $MEOW_DISK_PERCENT"
 }
 
-# Two readings of /proc/stat are needed for a real percentage; the previous one
-# is kept in the same cache file the hardware facts live in.
-meow_cpu_usage() {
-  local cpu user nice system idle iowait irq softirq steal rest
-  local -i idle_now total_now total_prev=0 idle_prev=0 usage=0 total_delta idle_delta
-  REPLY=0
+# "busy total" from the first line of /proc/stat, in REPLY. Busy is user,
+# nice, system, irq and softirq; total adds idle and iowait. Steal, the time a
+# hypervisor handed to another guest, is neither. The same split fastfetch
+# uses.
+meow_cpu_ticks() {
+  local cpu user nice system idle iowait irq softirq rest
+  local -i busy
+  REPLY=""
   [[ -r /proc/stat ]] || return
-  read -r cpu user nice system idle iowait irq softirq steal rest < /proc/stat
-  [[ "$user" == <-> && "$idle" == <-> ]] || return
-  idle_now=$(( idle + iowait ))
-  total_now=$(( user + nice + system + idle + iowait + irq + softirq + steal ))
-  if meow_cache_get cpu_sample -1; then
-    total_prev="${REPLY%% *}"
-    idle_prev="${REPLY##* }"
-  fi
-  meow_cache_set cpu_sample "${total_now} ${idle_now}"
-  if (( total_prev > 0 && total_now > total_prev )); then
-    total_delta=$(( total_now - total_prev ))
-    idle_delta=$(( idle_now - idle_prev ))
-    usage=$(( (200 * (total_delta - idle_delta) + total_delta) / (2 * total_delta) ))
-  elif (( total_now > 0 )); then
-    usage=$(( (200 * (total_now - idle_now) + total_now) / (2 * total_now) ))
-  fi
+  read -r cpu user nice system idle iowait irq softirq rest < /proc/stat
+  [[ "$cpu" == cpu && "$user" == <-> && "$idle" == <-> ]] || return
+  busy=$(( user + nice + system + ${irq:-0} + ${softirq:-0} ))
+  REPLY="$busy $(( busy + idle + ${iowait:-0} ))"
+}
+
+# CPU usage right now: two readings 200 ms apart, the window fastfetch samples
+# over. The wait is zselect, a builtin, so this shell sleeps through the window
+# rather than being counted in it. The answer is kept for MEOW_SAMPLE_TTL
+# seconds, so tabs opened together share one reading and one wait.
+#
+# This used to compare against the reading the previous shell left in the
+# cache, which made the figure the average over however long ago that shell
+# was: a whole afternoon, for the first terminal after lunch.
+meow_cpu_usage_raw() {
+  local -i busy1 total1 busy2 total2 usage
+  REPLY=""
+  meow_cpu_ticks; [[ -n "$REPLY" ]] || return
+  busy1=${REPLY% *} total1=${REPLY#* }
+  if (( $+builtins[zselect] )); then zselect -t 20; else sleep 0.2 2>/dev/null; fi
+  meow_cpu_ticks; [[ -n "$REPLY" ]] || return
+  busy2=${REPLY% *} total2=${REPLY#* }
+  REPLY=""
+  (( total2 > total1 )) || return
+  usage=$(( (200 * (busy2 - busy1) + (total2 - total1)) / (2 * (total2 - total1)) ))
   (( usage < 0 )) && usage=0
   (( usage > 100 )) && usage=100
   REPLY=$usage
+}
+
+# Empty when there is nothing to measure (no readable /proc/stat), so the
+# banner can say N/A instead of a made-up 0%.
+meow_cpu_usage() {
+  meow_cached cpu_usage $MEOW_SAMPLE_TTL meow_cpu_usage_raw
+  [[ "$REPLY" == <-> ]] || REPLY=""
 }
 
 meow_gpu_utils() {
@@ -581,8 +631,10 @@ CHIP="$REPLY"
 
 meow_cpu_cores
 CPU_CORES="$REPLY"
-[[ "$CPU_CORES" == <-> ]] || CPU_CORES=1
-meow_format_cores "$CPU_CORES"; CPU_CORE_TEXT="$REPLY"
+CPU_CORE_TEXT=""
+if [[ "$CPU_CORES" == <-> ]] && (( CPU_CORES > 0 )); then
+  meow_format_cores "$CPU_CORES" "$MEOW_CPU_UNIT"; CPU_CORE_TEXT="($REPLY)"
+fi
 
 meow_primary_ip; IP_ADDR="$REPLY"
 meow_uptime;     UP_TIME="$REPLY"
@@ -826,7 +878,11 @@ INFO_LINES+=("${BLUE}${MODEL_NAME}${RESET}")
 INFO_LINES+=("${DIM}CPU:${RESET} ${YELLOW}${CHIP}${RESET} ${DIM}(${ARCH})${RESET}")
 INFO_LINES+=("${DIM}User:${RESET} ${LIGHT_GREEN}${USER}${RESET}@${LIGHT_GREEN}${HOST_NAME}${RESET}")
 INFO_LINES+=("${DIM}========================================${RESET}")
-meow_gauge "CPU Usage:"  "$CPU_USAGE"    "(${CPU_CORE_TEXT})"
+if [[ -n "$CPU_USAGE" ]]; then
+  meow_gauge "CPU Usage:" "$CPU_USAGE" "$CPU_CORE_TEXT"
+else
+  meow_row "CPU Usage:" "N/A${CPU_CORE_TEXT:+ $CPU_CORE_TEXT}"
+fi
 meow_gauge "RAM Usage:"  "$RAM_PERCENT"  "(${VM_USED}/${VM_TOTAL} MB)"
 meow_gauge "Disk Usage:" "$DISK_PERCENT" "(${DISK_USED}/${DISK_TOTAL} MB)"
 if (( SWAP_TOTAL > 0 )); then
