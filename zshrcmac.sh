@@ -2,6 +2,7 @@ emulate -LR zsh
 setopt pipefail
 
 zmodload zsh/datetime 2>/dev/null
+zmodload zsh/zselect 2>/dev/null
 
 RESET="\033[0m"
 PINK="\033[1;35m"
@@ -158,6 +159,12 @@ meow_trim() {
 # down a pipe, and a surviving grandchild would keep that pipe open past the
 # kill. route and ipconfig are both single binaries. Slow-but-reliable
 # commands (system_profiler, top) are handled by the cache instead.
+#
+# The watchdog waits with zselect, a builtin, so it holds no child process and
+# dismissing it leaves nothing running. An external sleep would be orphaned
+# instead and linger for the rest of the limit, which is what the CI runner
+# reported as "Terminate orphan process: (sleep)". The sleep branch is only
+# for the unlikely case that zsh/zselect is unavailable.
 meow_run_limited() {
   emulate -L zsh
   setopt no_monitor no_notify
@@ -168,8 +175,14 @@ meow_run_limited() {
   (
     "$@" 2>/dev/null &
     cmd_pid=$!
-    ( sleep "$limit"; kill -KILL "$cmd_pid" ) >/dev/null 2>&1 &
+
+    if (( $+builtins[zselect] )); then
+      ( zselect -t $(( limit * 100 )); kill -KILL "$cmd_pid" ) >/dev/null 2>&1 &
+    else
+      ( sleep "$limit"; kill -KILL "$cmd_pid" ) >/dev/null 2>&1 &
+    fi
     watchdog_pid=$!
+
     wait "$cmd_pid" 2>/dev/null
     ret=$?
     kill -KILL "$watchdog_pid" 2>/dev/null
