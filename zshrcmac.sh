@@ -138,6 +138,44 @@ meow_color_line() {
   REPLY=$'\033['"${rainbow[$(( (${2:-0} % 6) + 1 ))]}"'m'"$1"$'\033[0m'
 }
 
+# The gauge rows keep their bars in one column. Each label is padded to the
+# longest one shown, so bars and percentages no longer step right with every
+# longer label ("Disk Usage:" is one wider than "CPU Usage:", "Memory
+# Pressure:" six). Labels are plain ASCII, so a character count is a column
+# count under any locale, and none of this forks.
+typeset -a MEOW_ROW_KEYS MEOW_ROW_VALS
+MEOW_ROW_KEYS=()
+MEOW_ROW_VALS=()
+
+# meow_row <label> <value>
+meow_row() {
+  MEOW_ROW_KEYS+=("$1")
+  MEOW_ROW_VALS+=("$2")
+}
+
+# meow_gauge <label> <percent> [detail]
+# The percentage is right-aligned to three places so the % signs line up too.
+meow_gauge() {
+  local pct="${2:-0}" bar color
+  meow_bar "$pct";   bar="$REPLY"
+  meow_color "$pct"; color="$REPLY"
+  (( ${#pct} < 3 )) && pct="${(l:3:)pct}"
+  meow_row "$1" "${color}${bar} ${pct}%${3:+ $3}"
+}
+
+# Appends the collected rows to INFO_LINES with their labels padded to a
+# common width.
+meow_flush_rows() {
+  local -i width=0 i
+  local key
+  for key in "${MEOW_ROW_KEYS[@]}"; do
+    (( ${#key} > width )) && width=${#key}
+  done
+  for (( i = 1; i <= ${#MEOW_ROW_KEYS}; i++ )); do
+    INFO_LINES+=("${CYAN}${(r:width:)MEOW_ROW_KEYS[i]} ${MEOW_ROW_VALS[i]}${RESET}")
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Probes
 #
@@ -605,6 +643,10 @@ if [[ "$USER" == "root" ]]; then
   CAT_2_TAIL='   づ づ  \ʃ'
   CAT_1_TEXT="${RED}SCARY!!!!! NOT FUN!!!!!${RESET}"
   CAT_2_TEXT="${RED}SCARY!!!!! NOT FUN!!!!!${RESET}"
+  # This caption is 23 columns wide, so its tab lands on column 24 while the
+  # short face rows land on 16. Two tabs put the faces on 24 as well, keeping
+  # the right-hand cat stacked over its own caption.
+  MEOW_FACE_GAP=$'\t\t'
 else
   CAT_1=$'   /\\_/\\\\\n  ( ≧ω≦ )'
   CAT_2=$'    /\\_/\\\\\n   ( OωO )'
@@ -612,6 +654,7 @@ else
   CAT_2_TAIL='   づ づ  \ʃ'
   CAT_1_TEXT="${PINK} Kimochiii!${RESET}"
   CAT_2_TEXT="${BLUE}  Kawayiii!${RESET}"
+  MEOW_FACE_GAP=$'\t'
 fi
 
 # Was: paste <(...) <(...) | while read. That spent a pipeline, two process
@@ -619,8 +662,12 @@ fi
 typeset -a MEOW_FACE_L MEOW_FACE_R
 MEOW_FACE_L=("${(@f)CAT_1}" "$CAT_1_TAIL" "$CAT_1_TEXT")
 MEOW_FACE_R=("${(@f)CAT_2}" "$CAT_2_TAIL" "$CAT_2_TEXT")
+# Tabs rather than spaces: a terminal that draws ambiguous-width characters
+# such as ω and ⊙ double wide still lands every row on the same tab stop.
 for (( MEOW_I = 1; MEOW_I <= ${#MEOW_FACE_L}; MEOW_I++ )); do
-  printf '%b\t%b\n' "${MEOW_FACE_L[MEOW_I]}" "${MEOW_FACE_R[MEOW_I]-}"
+  MEOW_GAP="$MEOW_FACE_GAP"
+  (( MEOW_I == ${#MEOW_FACE_L} )) && MEOW_GAP=$'\t'
+  printf '%b%s%b\n' "${MEOW_FACE_L[MEOW_I]}" "$MEOW_GAP" "${MEOW_FACE_R[MEOW_I]-}"
 done
 
 cecho ""
@@ -692,15 +739,6 @@ fi
 
 cecho ""
 
-meow_bar "$CPU_USAGE";    CPU_BAR="$REPLY"
-meow_bar "$RAM_PERCENT";  RAM_BAR="$REPLY"
-meow_bar "$DISK_PERCENT"; DISK_BAR="$REPLY"
-meow_color "$CPU_USAGE";    CPU_COLOR="$REPLY"
-meow_color "$RAM_PERCENT";  RAM_COLOR="$REPLY"
-meow_color "$DISK_PERCENT"; DISK_COLOR="$REPLY"
-meow_bar "$MEM_PRESSURE";   MEM_BAR="$REPLY"
-meow_color "$MEM_PRESSURE"; MEM_COLOR="$REPLY"
-
 CAT_ART_1=(
 "       I'm hungry!  "
 "              ノ    "
@@ -747,34 +785,39 @@ INFO_LINES+=("${BLUE}${MODEL_NAME}${RESET}")
 INFO_LINES+=("${DIM}CPU:${RESET} ${YELLOW}${CHIP}${RESET} ${DIM}(${ARCH})${RESET}")
 INFO_LINES+=("${DIM}User:${RESET} ${LIGHT_GREEN}${USER}${RESET}@${LIGHT_GREEN}${HOST_NAME}${RESET}")
 INFO_LINES+=("${DIM}========================================${RESET}")
-INFO_LINES+=("${CYAN}CPU Usage: ${CPU_COLOR}${CPU_BAR} ${CPU_USAGE}% (${CPU_CORE_TEXT})${RESET}")
-INFO_LINES+=("${CYAN}RAM Usage: ${RAM_COLOR}${RAM_BAR} ${RAM_PERCENT}% (${VM_USED}/${VM_TOTAL} MB)${RESET}")
-INFO_LINES+=("${CYAN}Disk Usage: ${DISK_COLOR}${DISK_BAR} ${DISK_PERCENT}% (${DISK_USED}/${DISK_TOTAL} MB)${RESET}")
-INFO_LINES+=("${CYAN}Memory Pressure: ${MEM_COLOR}${MEM_BAR} ${MEM_PRESSURE}%${RESET}")
-
+meow_gauge "CPU Usage:"       "$CPU_USAGE"    "(${CPU_CORE_TEXT})"
+meow_gauge "RAM Usage:"       "$RAM_PERCENT"  "(${VM_USED}/${VM_TOTAL} MB)"
+meow_gauge "Disk Usage:"      "$DISK_PERCENT" "(${DISK_USED}/${DISK_TOTAL} MB)"
+meow_gauge "Memory Pressure:" "$MEM_PRESSURE"
 if (( SWAP_TOTAL > 0 )); then
-  meow_bar "$SWAP_PERCENT";   SWAP_BAR="$REPLY"
-  meow_color "$SWAP_PERCENT"; SWAP_COLOR="$REPLY"
-  INFO_LINES+=("${CYAN}Swap Usage: ${SWAP_COLOR}${SWAP_BAR} ${SWAP_PERCENT}% (${SWAP_USED}/${SWAP_TOTAL} MB)${RESET}")
+  meow_gauge "Swap Usage:" "$SWAP_PERCENT" "(${SWAP_USED}/${SWAP_TOTAL} MB)"
 fi
 
 if (( ${#MEOW_GPU_NAMES} == 1 )); then
-  INFO_LINES+=("${CYAN}GPU: ${YELLOW}${MEOW_GPU_NAMES[1]}${RESET}")
+  meow_row "GPU:" "${YELLOW}${MEOW_GPU_NAMES[1]}"
 elif (( ${#MEOW_GPU_NAMES} > 1 )); then
   GPU_INDEX=0
   for util in "${MEOW_GPU_NAMES[@]}"; do
-    INFO_LINES+=("${CYAN}GPU${GPU_INDEX}: ${YELLOW}${util}${RESET}")
+    meow_row "GPU${GPU_INDEX}:" "${YELLOW}${util}"
     (( GPU_INDEX++ ))
   done
 fi
+
+meow_flush_rows
 
 # The old renderer measured each line's display width with a per-character loop
 # and then padded by "target_width - width", where target_width was 1. That is
 # never positive, so the padding was always zero and every measurement was
 # discarded. It also used printf -v, which zsh only learned in 5.3.
-integer row_index
-for (( row_index = 1; row_index <= ${#DEVICE_ART[@]}; row_index++ )); do
-  printf '%b %b\n' "${DEVICE_ART[row_index]}" "${INFO_LINES[row_index]:-}"
+#
+# More info rows than art rows (a second GPU plus swap, several disks) used to
+# vanish, because the loop only walked the ten art rows. The art column is now
+# padded out with blanks instead, the way fastfetch pads its logo.
+MEOW_ART_PAD="${(l:20:)}"
+integer row_index row_count=${#DEVICE_ART}
+(( ${#INFO_LINES} > row_count )) && row_count=${#INFO_LINES}
+for (( row_index = 1; row_index <= row_count; row_index++ )); do
+  printf '%b %b\n' "${DEVICE_ART[row_index]:-$MEOW_ART_PAD}" "${INFO_LINES[row_index]:-}"
 done
 
 cecho ""
@@ -794,7 +837,7 @@ unset RESET PINK CYAN YELLOW MAGENTA GREEN ORANGE BLUE DIM LIGHT_GREEN RED \
       CPU_BAR RAM_BAR DISK_BAR SWAP_BAR GPU_BAR MEM_BAR MEM_COLOR MEM_PRESSURE \
       RAM_USED RAM_TOTAL \
       CPU_COLOR RAM_COLOR DISK_COLOR SWAP_COLOR GPU_COLOR GPU_INDEX \
-      CAT_ART_1 CAT_ART_2 RAW_ART DEVICE_ART INFO_LINES art_index row_index \
+      CAT_ART_1 CAT_ART_2 RAW_ART DEVICE_ART INFO_LINES art_index row_index row_count \
       line util 2>/dev/null
 
 if (( $+commands[fastfetch] )); then

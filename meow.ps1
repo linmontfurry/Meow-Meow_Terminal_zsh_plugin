@@ -158,6 +158,26 @@ function Color-Line {
     return "$([char]27)[$color" + "m$Line$([char]27)[0m"
 }
 
+# The gauge rows keep their bars in one column. Each label is padded to the
+# longest one shown and the percentage is right-aligned to three places, so
+# neither bars nor % signs step right with every longer label ("Swap Usage:"
+# is one wider than "CPU Usage:"). Labels are plain ASCII, so a character count
+# is a column count.
+$gaugeRows = [System.Collections.Generic.List[object]]::new()
+
+function Add-MeowRow {
+    param([string]$Label, [string]$Value)
+    $script:gaugeRows.Add([pscustomobject]@{ Label = $Label; Value = $Value })
+}
+
+function Add-MeowGauge {
+    param([string]$Label, [int]$Percent, [string]$Detail = '')
+
+    $value = "$(Get-Color $Percent)$(Draw-Bar $Percent) $(([string]$Percent).PadLeft(3))%"
+    if ($Detail) { $value += " $Detail" }
+    Add-MeowRow -Label $Label -Value $value
+}
+
 # ---------------------------------------------------------------------------
 # Probes
 # ---------------------------------------------------------------------------
@@ -225,9 +245,11 @@ function Get-BatteryPercentage {
 # sample before it can report a rate. The formatted perf class is maintained by
 # the system and reads instantly; Get-Counter stays as the fallback.
 function Get-CpuUsage {
+    # No -Property on a filtered query: combined with -Filter on a property it
+    # does not list, it came back empty on the Windows CI runner, which is also
+    # what hid every disk line.
     try {
-        $perf = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor `
-                    -Filter "Name='_Total'" -Property PercentProcessorTime
+        $perf = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'"
         if ($perf -and $null -ne $perf.PercentProcessorTime) {
             $value = [int]$perf.PercentProcessorTime
             if ($value -ge 0 -and $value -le 100) { return $value }
@@ -280,8 +302,9 @@ function Get-SwapStats {
 function Get-DiskStats {
     $results = @()
     try {
-        $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType = 3" `
-                      -Property DeviceID, Size, FreeSpace | Sort-Object DeviceID
+        # No -Property here: combined with -Filter on DriveType, which it does
+        # not list, this returned nothing on Windows and every disk line vanished.
+        $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType = 3" | Sort-Object DeviceID
         foreach ($drive in $drives) {
             $sizeBytes = [double]$drive.Size
             $freeBytes = [double]$drive.FreeSpace
@@ -395,9 +418,12 @@ $chip = Get-MeowCached -Key 'chip' -Ttl $MeowStaticTtl -Compute {
     try {
         $p = Get-CimInstance Win32_Processor -Property Name -ErrorAction Stop |
                  Select-Object -ExpandProperty Name -First 1
-        if ($p) { $p } else { '' }
+        if ($p) { $p.Trim() } else { '' }
     } catch { '' }
 }
+# Win32_Processor pads the name with trailing blanks ("AMD EPYC 7763 64-Core
+# Processor" plus sixteen spaces), which shoved "(AMD64)" far off to the right.
+$chip = ([string]$chip).Trim()
 if (-not $chip) { $chip = 'Unknown CPU' }
 
 # .NET already knows this; Win32_ComputerSystem and Win32_Processor were being
@@ -503,6 +529,10 @@ if ($env:USERNAME -eq 'Administrator') {
     $cat2Tail = '   づ づ  \ʃ'
     $cat1Text = "${RED}SCARY!!!!! NOT FUN!!!!!${RESET}"
     $cat2Text = "${RED}SCARY!!!!! NOT FUN!!!!!${RESET}"
+    # This caption is 23 columns wide, so its tab lands on column 24 while the
+    # short face rows land on 16. Two tabs put the faces on 24 as well, keeping
+    # the right-hand cat stacked over its own caption.
+    $faceGap = "`t`t"
 } else {
     $cat1 = @"
    /\_/\
@@ -516,15 +546,19 @@ if ($env:USERNAME -eq 'Administrator') {
     $cat2Tail = '   づ づ  \ʃ'
     $cat1Text = "${PINK} Kimochiii!${RESET}"
     $cat2Text = "${BLUE}  Kawayiii!${RESET}"
+    $faceGap = "`t"
 }
 
 $leftBlock = ($cat1.TrimEnd() -split "`r?`n") + $cat1Tail + $cat1Text
 $rightBlock = ($cat2.TrimEnd() -split "`r?`n") + $cat2Tail + $cat2Text
 
+# Tabs rather than spaces: a console that draws ambiguous-width characters such
+# as ω and ⊙ double wide still lands every row on the same tab stop.
 for ($i = 0; $i -lt [math]::Max($leftBlock.Count, $rightBlock.Count); $i++) {
     $left = if ($i -lt $leftBlock.Count) { $leftBlock[$i] } else { '' }
     $right = if ($i -lt $rightBlock.Count) { $rightBlock[$i] } else { '' }
-    Write-Host ("{0}`t{1}" -f $left, $right)
+    $gap = if ($i -eq $leftBlock.Count - 1) { "`t" } else { $faceGap }
+    Write-Host ("{0}{1}{2}" -f $left, $gap, $right)
 }
 
 Write-MeowLine ''
@@ -600,11 +634,6 @@ if ($battery) {
 
 Write-MeowLine ''
 
-$cpuBar = Draw-Bar $cpuUsage
-$ramBar = Draw-Bar $memory.Percent
-$cpuColor = Get-Color $cpuUsage
-$ramColor = Get-Color $memory.Percent
-
 $catArt1 = @(
 "       I'm hungry!  ",
 "              ノ    ",
@@ -644,45 +673,52 @@ $infoLines += "${BLUE}${modelName}${RESET}"
 $infoLines += "${DIM}CPU:${RESET} ${YELLOW}${chip}${RESET} ${DIM}(${arch})${RESET}"
 $infoLines += "${DIM}User:${RESET} ${LIGHT_GREEN}$($env:USERNAME)${RESET}@${LIGHT_GREEN}${hostName}${RESET}"
 $infoLines += "${DIM}========================================${RESET}"
-$infoLines += "${CYAN}CPU Usage: ${cpuColor}${cpuBar} ${cpuUsage}% (${cpuCoreText})${RESET}"
-$infoLines += "${CYAN}RAM Usage: ${ramColor}${ramBar} $($memory.Percent)% ($($memory.UsedMB)/$($memory.TotalMB) MB)${RESET}"
+Add-MeowGauge -Label 'CPU Usage:' -Percent $cpuUsage -Detail "(${cpuCoreText})"
+Add-MeowGauge -Label 'RAM Usage:' -Percent $memory.Percent -Detail "($($memory.UsedMB)/$($memory.TotalMB) MB)"
 
 if ($swap.TotalMB -gt 0) {
-    $swapBar = Draw-Bar $swap.Percent
-    $swapColor = Get-Color $swap.Percent
-    $infoLines += "${CYAN}Swap Usage: ${swapColor}${swapBar} $($swap.Percent)% ($($swap.UsedMB)/$($swap.TotalMB) MB)${RESET}"
+    Add-MeowGauge -Label 'Swap Usage:' -Percent $swap.Percent -Detail "($($swap.UsedMB)/$($swap.TotalMB) MB)"
 }
 
 if ($gpuStats.Count -eq 1) {
     $gpu = $gpuStats[0]
     if ($null -ne $gpu.Usage) {
-        $gpuBar = Draw-Bar $gpu.Usage
-        $gpuColor = Get-Color $gpu.Usage
-        $infoLines += "${CYAN}GPU Usage: ${gpuColor}${gpuBar} $($gpu.Usage)%${RESET}"
+        Add-MeowGauge -Label 'GPU Usage:' -Percent $gpu.Usage
     }
 } elseif ($gpuStats.Count -gt 1) {
     foreach ($gpu in $gpuStats) {
         if ($null -ne $gpu.Usage) {
-            $gpuBar = Draw-Bar $gpu.Usage
-            $gpuColor = Get-Color $gpu.Usage
-            $infoLines += "${CYAN}GPU$($gpu.Index): ${gpuColor}${gpuBar} $($gpu.Usage)%${RESET}"
+            Add-MeowGauge -Label "GPU$($gpu.Index):" -Percent $gpu.Usage
         } else {
-            $infoLines += "${CYAN}GPU$($gpu.Index): ${YELLOW}$($gpu.Name)${RESET}"
+            Add-MeowRow -Label "GPU$($gpu.Index):" -Value "${YELLOW}$($gpu.Name)"
         }
     }
 }
 
 foreach ($disk in $disks) {
-    $diskBar = Draw-Bar $disk.Percent
-    $diskColor = Get-Color $disk.Percent
-    $infoLines += "${CYAN}Disk $($disk.Name): ${diskColor}${diskBar} $($disk.Percent)% ($($disk.UsedMB)/$($disk.TotalMB) MB)${RESET}"
+    # DeviceID already carries its colon ("C:"); appending another printed "Disk C::".
+    Add-MeowGauge -Label "Disk $($disk.Name.TrimEnd(':')):" -Percent $disk.Percent -Detail "($($disk.UsedMB)/$($disk.TotalMB) MB)"
+}
+
+$labelWidth = 0
+foreach ($row in $gaugeRows) {
+    if ($row.Label.Length -gt $labelWidth) { $labelWidth = $row.Label.Length }
+}
+foreach ($row in $gaugeRows) {
+    $infoLines += "${CYAN}$($row.Label.PadRight($labelWidth)) $($row.Value)${RESET}"
 }
 
 # Get-DisplayWidth used to measure every line character by character, then pad
 # by "targetWidth - width" with targetWidth fixed at 1. That is never positive,
 # so the padding was always clamped to zero and the measurement thrown away.
-for ($i = 0; $i -lt $deviceArt.Count; $i++) {
-    $left = $deviceArt[$i]
+#
+# More info rows than art rows (a couple of disks plus two GPUs) used to vanish,
+# because the loop only walked the ten art rows. The art column is now padded
+# out with blanks instead, the way fastfetch pads its logo.
+$artPad = ' ' * 20
+$rowCount = [math]::Max($deviceArt.Count, $infoLines.Count)
+for ($i = 0; $i -lt $rowCount; $i++) {
+    $left = if ($i -lt $deviceArt.Count) { $deviceArt[$i] } else { $artPad }
     $right = if ($i -lt $infoLines.Count) { $infoLines[$i] } else { '' }
     Write-Host ("{0} {1}" -f $left, $right)
 }
