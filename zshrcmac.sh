@@ -424,7 +424,10 @@ meow_battery() {
 # 5/8 each time (osfmk/kern/priority.c), so it is a moving average over about
 # the last half second, not the minute the BSD manual describes. Summed and
 # divided by the logical CPU count, that is the machine's load at this moment,
-# from one process that returns in milliseconds.
+# from one process that returns in milliseconds. On the macOS CI runner it came
+# within a point, on average, of top's own one-second samples taken at the same
+# moment; reading the tick counters directly would mean waiting on top, whose
+# delay only takes whole seconds.
 #
 # This shell is left out. Its last half second is spent starting up (oh-my-zsh,
 # plugins, this banner), and that would otherwise be reported as load on the
