@@ -33,9 +33,16 @@ Linux或者MacOS系统，请确保你的系统安装了 `zsh` 并且设置为默
    ```bash
    mkdir -p "${ZSH_CUSTOM:-$ZSH/custom}"/plugins/meow-meow
    ```
-2. 下载脚本到该插件目录：
+2. 下载对应系统的脚本到该插件目录：
+
+   Linux：
    ```bash
-   curl -L https://raw.githubusercontent.com/linmontfurry/Meow-Meow_Terminal_zsh_plugin/refs/heads/main/zshrc.sh -o "${ZSH_CUSTOM:-$ZSH/custom}"/plugins/meow-meow/meow-meow.plugin.zsh
+   curl -L https://raw.githubusercontent.com/linmontfurry/Meow-Meow_Terminal_zsh_plugin/refs/heads/main/zshrclinux.sh -o "${ZSH_CUSTOM:-$ZSH/custom}"/plugins/meow-meow/meow-meow.plugin.zsh
+   ```
+
+   macOS：
+   ```bash
+   curl -L https://raw.githubusercontent.com/linmontfurry/Meow-Meow_Terminal_zsh_plugin/refs/heads/main/zshrcmac.sh -o "${ZSH_CUSTOM:-$ZSH/custom}"/plugins/meow-meow/meow-meow.plugin.zsh
    ```
 3. 修改 `~/.zshrc`，在 `plugins` 列表中加上 `meow-meow`：
    ```bash
@@ -115,8 +122,36 @@ Code-Download ZIP
 
 4. 将powershell7切换到解压目录并运行
  ``` cd [解压目录]
-.\index2.ps1
+.\meow.ps1
  ```
+
+如果希望每次打开终端都自动显示，把上面那行加入你的 PowerShell 配置文件（`$PROFILE`）即可
+
+## 缓存与调优
+
+脚本会把**不会变的硬件信息**（机型、CPU 型号、GPU 名称、核心数）和**少数很慢的采样**缓存下来，避免每开一次终端都重新探测一遍。
+
+缓存只有**一个固定文件**，每次原地覆写。开一万次终端也只有这一个文件，不会堆积：
+
+| 系统 | 位置 |
+| --- | --- |
+| Linux / macOS | `${XDG_CACHE_HOME:-~/.cache}/meow-terminal/facts`，都没有时退回 `${TMPDIR:-/tmp}/meow-terminal-<uid>/facts` |
+| Windows | `%LOCALAPPDATA%\meow-terminal\facts` |
+
+选 `~/.cache` 而不是 `/tmp`，是因为 `/tmp` 重启就被清空（部分系统还是 tmpfs，占内存），缓存每次开机都会失效。文件本身只有一百多字节，放哪都无所谓，没有 `HOME` 时会自动退回 `/tmp`。
+
+两个环境变量可以调：
+
+```sh
+export MEOW_STATIC_TTL=604800   # 硬件信息缓存多久（秒），默认 7 天
+export MEOW_SAMPLE_TTL=10       # 昂贵采样缓存多久（秒），默认 10 秒
+```
+
+`MEOW_SAMPLE_TTL` 管的是 CPU 占用率这类必须实时取、但取一次很慢的数据（macOS 的 `top`、Windows 的 GPU 计数器）。连开好几个标签页时它让后面几个几乎瞬间出来；调大更快，但显示的数字会更旧。想每次都重新探测就设成 `0`。
+
+探测失败不会写进缓存，所以偶尔一次失败不会让 `Unknown CPU` 之类的结果被锁上很久。
+
+删掉缓存文件随时可以，下次开终端会自动重建。
 
 ## TODO list
 
