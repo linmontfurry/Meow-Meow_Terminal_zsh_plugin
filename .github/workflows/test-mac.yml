@@ -38,15 +38,14 @@ jobs:
       - name: Diagnostics (temporary, will be reverted)
         shell: bash
         run: |
-          echo '--- sysctl'; sysctl hw.physicalcpu hw.logicalcpu
-          echo '--- ps %cpu of a zsh that was busy for 1 s, then while it sleeps'
-          zsh -c 'zmodload zsh/datetime zsh/zselect; end=$(( EPOCHREALTIME + 1.0 )); while (( EPOCHREALTIME < end )); do :; done; for t in 0 12 13 25 50 100; do (( t )) && zselect -t $t; printf "after +%3s cs: %s%%\n" $t "$(ps -o %cpu= -p $$)"; done'
-          echo '--- banner CPU (own shell excluded / included) vs top over 1 s'
-          sed 's/\[\[ "\$pid" == "\$\$" \]\] && continue//' zshrcmac.sh > /tmp/noexcl.sh
-          grep -c 'pid" == "\$\$"' /tmp/noexcl.sh || true
-          for i in 1 2 3; do
-            a=$(MEOW_SAMPLE_TTL=0 zsh ./zshrcmac.sh | sed -E 's/\x1b\[[0-9;]*m//g' | grep -o 'CPU Usage:.*%')
-            b=$(MEOW_SAMPLE_TTL=0 zsh /tmp/noexcl.sh | sed -E 's/\x1b\[[0-9;]*m//g' | grep -o 'CPU Usage:.*%')
-            t=$(top -l 2 -n 0 -s 1 | grep 'CPU usage' | tail -1)
-            echo "excluded: ${a##* } | included: ${b##* } | top: $t"
+          t() { local s=$(python3 -c 'import time;print(time.time())' 2>/dev/null || date +%s); "$@" > /tmp/out.txt 2>&1; local rc=$?; local e=$(python3 -c 'import time;print(time.time())' 2>/dev/null || date +%s); echo "rc=$rc took $(python3 -c "print(round($e-$s,2))" 2>/dev/null)s: $(grep -E 'CPU usage|us|[0-9]' /tmp/out.txt | tail -2 | tr '\n' '|')"; }
+          echo '--- top with fractional delays'; t top -l 2 -n 0 -s 0.2; t top -l 2 -n 0 -s 1; t top -l 1 -n 0
+          echo '--- iostat'; t iostat -C -n 0 -c 2 -w 1; t iostat -C -n 0 -c 2 -w 0.2
+          echo '--- same moment: top 1 s window vs ps sum (mid-window) vs top 0.2 s'
+          for i in 1 2 3 4 5; do
+            top -l 2 -n 0 -s 1 > /tmp/top.txt &
+            sleep 0.5
+            ps -A -o %cpu= | awk -v n=$(sysctl -n hw.logicalcpu) '{s+=$1} END {printf "%.1f\n", s/n}' > /tmp/ps.txt
+            wait
+            echo "top 1s busy: $(grep 'CPU usage' /tmp/top.txt | tail -1 | awk '{print 100-$7}') | ps sum: $(cat /tmp/ps.txt)"
           done
