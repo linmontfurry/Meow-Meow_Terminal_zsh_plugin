@@ -617,11 +617,6 @@ meow_primary_ip() {
   REPLY="$ip_addr"
 }
 
-meow_parent_comm() {
-  REPLY="$(ps -o comm= -p $PPID 2>/dev/null)"
-  REPLY="${REPLY%%$'\n'*}"
-}
-
 # ---------------------------------------------------------------------------
 # Gather
 # ---------------------------------------------------------------------------
@@ -760,7 +755,10 @@ meow_echo "${BLUE}Welcome to Meow-Meow Terminal!${RESET}"
 meow_echo "${CYAN}Cat says:${RESET} ${ORANGE}${WELCOME}${RESET}"
 meow_echo ""
 
-if [[ "$USER" == "root" ]]; then
+# Root is the effective uid, not $USER. su keeps the caller's USER when the
+# target is root, as BSD su does, so an su to root used to get the ordinary cat
+# and the caller's name.
+if (( EUID == 0 )); then
   CAT_1=$'   /\\_/\\\\\n  ( ⊙ʌ⊙ )'
   CAT_2=$'    /\\_/\\\\\n   ( ⊙ʌ⊙ )'
   CAT_1_TAIL=' ʔ/ づ づ'
@@ -796,7 +794,7 @@ done
 
 meow_echo ""
 
-if [[ "$USER" == "root" ]]; then
+if (( EUID == 0 )); then
   USER_NAME="${RED}powerful master${RESET}"
   meow_echo "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}... oh no!${RESET}"
   meow_echo "${RED}Cat is scared!${RESET}"
@@ -815,17 +813,10 @@ if [[ -n "$SSH_CONNECTION" || -n "$SSH_CLIENT" || -n "$SSH_TTY" ]]; then
   CONNECTION_TYPE="SSH"
   LOGIN_IP="${${=SSH_CONNECTION}[1]}"
   [[ -n "$LOGIN_IP" ]] || LOGIN_IP="${${=SSH_CLIENT}[1]}"
-else
-  meow_parent_comm
-  if [[ "$REPLY" == *telnet* || "$REPLY" == *rlogin* ]]; then
-    CONNECTION_TYPE="telnet"
-    LOGIN_IP="${${=$(who am i 2>/dev/null)}[-1]}"
-    LOGIN_IP="${LOGIN_IP//[()]/}"
-    if [[ -z "$LOGIN_IP" ]] && (( $+commands[netstat] )); then
-      LOGIN_IP="$(netstat -n 2>/dev/null | awk '/ESTABLISHED/ && /\.23 / {sub(/\.[0-9]+$/, "", $5); print $5; exit}')"
-    fi
-  fi
 fi
+# The telnet check that stood here compared the shell's parent with "telnet",
+# but under telnetd that parent is login, so it never fired; current macOS has
+# no telnet server to begin with. All it did was start a ps on every shell.
 
 if [[ -n "$CONNECTION_TYPE" ]]; then
   if [[ -n "$LOGIN_IP" ]]; then

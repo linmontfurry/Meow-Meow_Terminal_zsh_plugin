@@ -761,16 +761,10 @@ if ($env:SSH_CONNECTION -or $env:SSH_CLIENT -or $env:SSH_TTY) {
     $connectionType = "SSH"
     $sshInfo = if ($env:SSH_CONNECTION) { $env:SSH_CONNECTION } else { $env:SSH_CLIENT }
     $loginIP = ($sshInfo -split '\s+')[0]
-} elseif ($env:TERM -match 'screen|tmux' -and (Get-Process -Id $PID).Parent.ProcessName -match 'telnet|rlogin') {
-    $connectionType = "telnet"
-    try {
-        $netstat = netstat -an | Select-String "ESTABLISHED" | Select-String ":23\s"
-        if ($netstat) {
-            $loginIP = ($netstat -split '\s+')[2] -replace ':.*$', ''
-        }
-    } catch {
-    }
 }
+# A telnet check used to follow. It needed pwsh's parent process to be named
+# telnet or rlogin, and TERM to name screen or tmux as well, while the Windows
+# versions PowerShell 7 runs on ship no Telnet server: it had nothing to find.
 
 if ($connectionType) {
     if ($loginIP) {

@@ -605,11 +605,28 @@ meow_gpu_utils() {
   meow_cache_set gpu_utils "${(j: :)MEOW_GPU_UTILS}"
 }
 
-meow_parent_comm() {
+# The daemon a login came through, if it was telnet or rlogin. The chain there
+# is telnetd -> login -> shell, so the shell's parent is login and the daemon is
+# one step further up; only a telnetd told to start the shell itself (BusyBox
+# "telnetd -l /bin/zsh") is the parent. The old check looked at the parent alone
+# and so could never fire under a normal telnetd. Two /proc reads, no process.
+meow_login_daemon() {
+  local pid=$PPID comm stat
+  local -i depth
   REPLY=""
-  [[ -r "/proc/$PPID/comm" ]] && REPLY="$(</proc/$PPID/comm)"
-  [[ -n "$REPLY" ]] || REPLY="$(ps -o comm= -p $PPID 2>/dev/null)"
-  REPLY="${REPLY%%$'\n'*}"
+  for (( depth = 0; depth < 2; depth++ )); do
+    [[ -r /proc/$pid/comm ]] || return
+    comm="$(</proc/$pid/comm)"
+    case "$comm" in
+      (*telnet*|*rlogin*) REPLY="$comm"; return ;;
+    esac
+    [[ -r /proc/$pid/stat ]] || return
+    # "pid (comm) state ppid ...". comm may contain spaces, so split after ")".
+    stat="$(</proc/$pid/stat)"
+    stat="${stat##*) }"
+    pid="${${(s: :)stat}[2]}"
+    [[ "$pid" == <-> && "$pid" != [01] ]] || return
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -727,7 +744,10 @@ meow_echo "${BLUE}Welcome to Meow-Meow Terminal!${RESET}"
 meow_echo "${CYAN}Cat says:${RESET} ${ORANGE}${WELCOME}${RESET}"
 meow_echo ""
 
-if [[ "$USER" == "root" ]]; then
+# Root is the effective uid, not $USER. su keeps the caller's USER when the
+# target is root (util-linux and BSD su alike), and containers often set no
+# USER at all, so both used to get the ordinary cat and an empty name.
+if (( EUID == 0 )); then
   CAT_1=$'   /\\_/\\\\\n  ( ⊙ʌ⊙ )'
   CAT_2=$'    /\\_/\\\\\n   ( ⊙ʌ⊙ )'
   CAT_1_TAIL=' ʔ/ づ づ'
@@ -763,7 +783,7 @@ done
 
 meow_echo ""
 
-if [[ "$USER" == "root" ]]; then
+if (( EUID == 0 )); then
   USER_NAME="${RED}powerful master${RESET}"
   meow_echo "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}... oh no!${RESET}"
   meow_echo "${RED}Cat is scared!${RESET}"
@@ -783,8 +803,8 @@ if [[ -n "$SSH_CONNECTION" || -n "$SSH_CLIENT" || -n "$SSH_TTY" ]]; then
   LOGIN_IP="${${=SSH_CONNECTION}[1]}"
   [[ -n "$LOGIN_IP" ]] || LOGIN_IP="${${=SSH_CLIENT}[1]}"
 else
-  meow_parent_comm
-  if [[ "$REPLY" == *telnet* || "$REPLY" == *rlogin* ]]; then
+  meow_login_daemon
+  if [[ -n "$REPLY" ]]; then
     CONNECTION_TYPE="telnet"
     LOGIN_IP="${${=$(who am i 2>/dev/null)}[-1]}"
     LOGIN_IP="${LOGIN_IP//[()]/}"
