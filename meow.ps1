@@ -245,9 +245,6 @@ function Get-BatteryPercentage {
 # sample before it can report a rate. The formatted perf class is maintained by
 # the system and reads instantly; Get-Counter stays as the fallback.
 function Get-CpuUsage {
-    # No -Property on a filtered query: combined with -Filter on a property it
-    # does not list, it came back empty on the Windows CI runner, which is also
-    # what hid every disk line.
     try {
         $perf = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'"
         if ($perf -and $null -ne $perf.PercentProcessorTime) {
@@ -299,21 +296,33 @@ function Get-SwapStats {
     }
 }
 
+# DriveInfo makes the same Win32 calls Win32_LogicalDisk wraps (GetDriveType,
+# GetDiskFreeSpaceEx) without a WMI round-trip, so it is the cheaper way to ask.
+# Fixed + ready matches the old DriveType = 3 filter: local disks only, no
+# removable, optical or network drives.
 function Get-DiskStats {
     $results = @()
     try {
-        # No -Property here: combined with -Filter on DriveType, which it does
-        # not list, this returned nothing on Windows and every disk line vanished.
-        $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType = 3" | Sort-Object DeviceID
+        $drives = [System.IO.DriveInfo]::GetDrives() |
+            Where-Object { $_.DriveType -eq [System.IO.DriveType]::Fixed -and $_.IsReady } |
+            Sort-Object Name
         foreach ($drive in $drives) {
-            $sizeBytes = [double]$drive.Size
-            $freeBytes = [double]$drive.FreeSpace
-            $usedBytes = [math]::Max(0, $sizeBytes - $freeBytes)
+            $sizeBytes = [double]$drive.TotalSize
+            $freeBytes = [double]$drive.TotalFreeSpace
+            # [double]0, not 0: with an Int32 first argument PowerShell binds
+            # Max(Int32, Int32) for any runtime value, so a disk with more than
+            # 2 GiB used threw here, the catch below swallowed it, and every disk
+            # line silently disappeared. That has been the case since this line
+            # was first written.
+            $usedBytes = [math]::Max([double]0, $sizeBytes - $freeBytes)
             $totalMB = Format-BytesToMB $sizeBytes
             $usedMB = Format-BytesToMB $usedBytes
             $percent = if ($totalMB -gt 0) { [int][math]::Round(($usedMB * 100) / $totalMB) } else { 0 }
+            # "C:\" -> "C:". A root such as "/" would trim to nothing, so keep it whole.
+            $name = $drive.Name.TrimEnd('\', '/')
+            if (-not $name) { $name = $drive.Name }
             $results += [pscustomobject]@{
-                Name = $drive.DeviceID; UsedMB = $usedMB; TotalMB = $totalMB; Percent = $percent
+                Name = $name; UsedMB = $usedMB; TotalMB = $totalMB; Percent = $percent
             }
         }
     } catch {
