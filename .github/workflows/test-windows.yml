@@ -50,13 +50,3 @@ jobs:
           Set-ExecutionPolicy Bypass -Scope Process -Force
           .\meow.ps1 > output.txt
           Get-Content output.txt
-
-      - name: Diagnostics (temporary, will be reverted)
-        shell: pwsh
-        run: |
-          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-List | Out-String | Write-Host
-          Write-Host "ProcessorCount: $([Environment]::ProcessorCount)"
-          $s = (Get-Counter '\Processor Information(_Total)\% Processor Utility', '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3).CounterSamples
-          $s | Select-Object Path, CookedValue | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
-          Write-Host '--- cache after the run'
-          Get-Content "$env:LOCALAPPDATA\meow-terminal\facts"

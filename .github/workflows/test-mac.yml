@@ -34,23 +34,3 @@ jobs:
           chmod +x ./zshrcmac.sh
           zsh ./zshrcmac.sh > output.txt
           cat output.txt
-
-      - name: Diagnostics (temporary, will be reverted)
-        shell: bash
-        run: |
-          set +e
-          now() { python3 -c 'import time;print(time.time())'; }
-          t() { local s=$(now); "$@" > /tmp/out.txt 2>&1; local rc=$?; local e=$(now); echo "== $* -> rc=$rc, $(python3 -c "print(round($e-$s,2))")s"; grep -E 'CPU usage|usage|invalid|illegal|delay|us +sy|^ *[0-9]' /tmp/out.txt | tail -4; }
-          t top -l 2 -n 0 -s 0.2
-          t top -l 2 -n 0 -s 1
-          t top -l 1 -n 0
-          t iostat -C -n 0 -c 2 -w 1
-          t iostat -C -n 0 -c 2 -w 0.2
-          echo '--- same moment: top 1 s window vs ps sum taken mid-window'
-          for i in 1 2 3 4 5; do
-            top -l 2 -n 0 -s 1 > /tmp/top.txt &
-            sleep 0.5
-            ps -A -o %cpu= | awk -v n=$(sysctl -n hw.logicalcpu) '{s+=$1} END {printf "%.1f\n", s/n}' > /tmp/ps.txt
-            wait
-            echo "top 1s busy: $(grep 'CPU usage' /tmp/top.txt | tail -1 | awk '{print 100-$7}') | ps sum: $(cat /tmp/ps.txt)"
-          done
