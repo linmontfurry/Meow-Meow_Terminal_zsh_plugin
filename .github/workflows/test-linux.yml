@@ -38,3 +38,15 @@ jobs:
           chmod +x ./zshrclinux.sh
           zsh ./zshrclinux.sh > output.txt
           cat output.txt
+
+      - name: Diagnostics (temporary, will be reverted)
+        shell: bash
+        run: |
+          lscpu | grep -E '^(CPU\(s\)|Thread|Core|Socket)'
+          for c in /sys/devices/system/cpu/cpu[0-9]*; do echo "$(basename $c): $(cat $c/topology/thread_siblings_list)"; done
+          ip -4 route get 1.1.1.1; ip -4 route show default
+          for i in 1 2 3; do
+            b=$(MEOW_SAMPLE_TTL=0 zsh ./zshrclinux.sh | sed -E 's/\x1b\[[0-9;]*m//g' | grep -o 'CPU Usage:.*')
+            v=$(vmstat 1 2 | tail -1)
+            echo "banner: $b | vmstat 1 s (us sy id wa st): $v"
+          done

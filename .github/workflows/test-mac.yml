@@ -34,3 +34,19 @@ jobs:
           chmod +x ./zshrcmac.sh
           zsh ./zshrcmac.sh > output.txt
           cat output.txt
+
+      - name: Diagnostics (temporary, will be reverted)
+        shell: bash
+        run: |
+          echo '--- sysctl'; sysctl hw.physicalcpu hw.logicalcpu
+          echo '--- ps %cpu of a zsh that was busy for 1 s, then while it sleeps'
+          zsh -c 'zmodload zsh/datetime zsh/zselect; end=$(( EPOCHREALTIME + 1.0 )); while (( EPOCHREALTIME < end )); do :; done; for t in 0 12 13 25 50 100; do (( t )) && zselect -t $t; printf "after +%3s cs: %s%%\n" $t "$(ps -o %cpu= -p $$)"; done'
+          echo '--- banner CPU (own shell excluded / included) vs top over 1 s'
+          sed 's/\[\[ "\$pid" == "\$\$" \]\] && continue//' zshrcmac.sh > /tmp/noexcl.sh
+          grep -c 'pid" == "\$\$"' /tmp/noexcl.sh || true
+          for i in 1 2 3; do
+            a=$(MEOW_SAMPLE_TTL=0 zsh ./zshrcmac.sh | sed -E 's/\x1b\[[0-9;]*m//g' | grep -o 'CPU Usage:.*%')
+            b=$(MEOW_SAMPLE_TTL=0 zsh /tmp/noexcl.sh | sed -E 's/\x1b\[[0-9;]*m//g' | grep -o 'CPU Usage:.*%')
+            t=$(top -l 2 -n 0 -s 1 | grep 'CPU usage' | tail -1)
+            echo "excluded: ${a##* } | included: ${b##* } | top: $t"
+          done
