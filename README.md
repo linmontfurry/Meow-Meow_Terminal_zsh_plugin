@@ -27,7 +27,32 @@ Linux或者MacOS系统，请确保你的系统安装了 `zsh` 并且设置为默
 
 ### Oh My Zsh 用户安装方法
 
-如果你已经安装了 Oh My Zsh，你可以按照以下步骤作为自定义插件安装：
+**推荐：把仓库直接 clone 到插件目录。** 插件会自动识别 Linux 或 macOS，之后更新也只要 `git pull`。
+
+1. clone 到自定义插件目录：
+   ```bash
+   git clone https://github.com/linmontfurry/Meow-Meow_Terminal_zsh_plugin.git "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"/plugins/meow-meow
+   ```
+2. 修改 `~/.zshrc`，在 `plugins` 列表中加上 `meow-meow`：
+   ```bash
+   plugins=(
+       # ... 其他插件
+       meow-meow
+   )
+   ```
+3. 保存并重启终端, 或者:
+   ```bash
+   omz reload # or source ~/.zshrc
+   ```
+
+以后更新：
+
+```bash
+git -C "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"/plugins/meow-meow pull
+```
+
+<details>
+<summary>也可以只下载单个脚本</summary>
 
 1. 创建插件目录：
    ```bash
@@ -44,18 +69,15 @@ Linux或者MacOS系统，请确保你的系统安装了 `zsh` 并且设置为默
    ```bash
    curl -L https://raw.githubusercontent.com/linmontfurry/Meow-Meow_Terminal_zsh_plugin/refs/heads/main/zshrcmac.sh -o "${ZSH_CUSTOM:-$ZSH/custom}"/plugins/meow-meow/meow-meow.plugin.zsh
    ```
-3. 修改 `~/.zshrc`，在 `plugins` 列表中加上 `meow-meow`：
-   ```bash
-   plugins=(
-       # ... 其他插件
-       meow-meow
-   )
-   ```
+3. 之后同上，在 `plugins` 里加上 `meow-meow`。
 
-4. 保存并重启终端, 或者:
-   ```bash
-   omz reload # or source ~/.zshrc
-   ```
+</details>
+
+用其他插件管理器（zinit、antidote、antigen、zplug 等）时，它们按惯例会加载仓库根目录的 `meow-meow.plugin.zsh`，这个文件就是插件入口。
+
+**Powerlevel10k 用户：** 如果开启了 instant prompt，p10k 检测到 zsh 初始化期间有输出时会显示一段警告。banner 本来就是在初始化时打印的，所以按 p10k 官方文档的建议，在 `~/.p10k.zsh` 里把 `POWERLEVEL9K_INSTANT_PROMPT` 改成 `quiet` 即可。这只会关掉警告，banner 照常显示。
+
+插件不会改动你的 shell 环境：你设置的 zsh 选项、同名的变量和函数都会原样保留。
 
 *参考资料：[Oh My Zsh Customization - Overriding and adding plugins](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization#overriding-and-adding-plugins)*
 
