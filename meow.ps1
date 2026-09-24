@@ -29,7 +29,9 @@ function Write-MeowLine {
 
 $MeowStaticTtl = if ($env:MEOW_STATIC_TTL) { [int]$env:MEOW_STATIC_TTL } else { 604800 }
 $MeowSampleTtl = if ($env:MEOW_SAMPLE_TTL) { [int]$env:MEOW_SAMPLE_TTL } else { 10 }
-$MeowNow = [int][double]::Parse(([datetimeoffset]::UtcNow.ToUnixTimeSeconds()).ToString())
+# Int64: an Int32 of epoch seconds runs out in January 2038, and every cache
+# entry would then fail to parse and be probed afresh on every shell.
+$MeowNow = [datetimeoffset]::UtcNow.ToUnixTimeSeconds()
 
 $MeowCacheDir = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'meow-terminal' }
                 elseif ($env:XDG_CACHE_HOME) { Join-Path $env:XDG_CACHE_HOME 'meow-terminal' }
@@ -46,8 +48,8 @@ function Read-MeowCache {
         foreach ($line in [System.IO.File]::ReadAllLines($script:MeowCacheFile)) {
             $parts = $line.Split(' ', 3)
             if ($parts.Count -lt 3) { continue }
-            $stamp = 0
-            if (-not [int]::TryParse($parts[0], [ref]$stamp)) { continue }
+            $stamp = [int64]0
+            if (-not [int64]::TryParse($parts[0], [ref]$stamp)) { continue }
             $script:MeowCache[$parts[1]] = @{ Stamp = $stamp; Value = $parts[2] }
         }
     } catch {

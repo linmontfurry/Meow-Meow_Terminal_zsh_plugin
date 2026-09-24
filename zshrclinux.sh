@@ -297,6 +297,8 @@ meow_model_name() {
   for path in $sources; do
     [[ -r "$path" ]] || continue
     REPLY="$(<$path)"
+    # Device-tree strings end in a NUL byte, which would otherwise be printed.
+    REPLY="${REPLY//$'\0'/}"
     REPLY="${REPLY%%$'\n'*}"
     meow_trim "$REPLY"
     [[ -n "$REPLY" ]] && return
