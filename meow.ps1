@@ -102,6 +102,27 @@ function Get-MeowCached {
     return $value
 }
 
+# Hardware only changes across a power cycle, so everything cached belongs to
+# the boot it was measured in. A new boot starts from an empty cache: a swapped
+# CPU or GPU shows up in the first shell after the machine comes back, instead
+# of up to MEOW_STATIC_TTL later. Boot times under a minute apart are the same
+# boot, since Windows moves the boot time when the clock is stepped.
+#
+# With Fast Startup on, "Shut down" hibernates the running boot instead of
+# ending it, and only a restart or a full shutdown moves the boot time. The GPU
+# list keeps itself current regardless (see Get-GpuStats), and the CPU name is
+# what Windows recorded at boot, so it agrees with Windows either way.
+function Set-MeowCacheBoot {
+    param($BootTime)
+
+    try { $boot = ([datetimeoffset]$BootTime).ToUnixTimeSeconds() } catch { return }
+    $stored = [int64]0
+    $hit = Get-MeowCache -Key 'boot' -MaxAge -1
+    if ($null -ne $hit -and [int64]::TryParse($hit, [ref]$stored) -and [math]::Abs($stored - $boot) -lt 60) { return }
+    $script:MeowCache.Clear()
+    Set-MeowCache -Key 'boot' -Value ([string]$boot)
+}
+
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
@@ -273,9 +294,18 @@ function Get-BatteryPercentage {
 # own: on three CI runs, on a runner busy running this very script, it read 0,
 # 26 and 0.
 #
-# Returned as "cpu|index:percent|...", the GPU part keyed by the physical
-# adapter index (phys_N) that Task Manager groups engines by. Memoised for the
-# run, so CPU and GPU share one sample even when it cannot be cached.
+# A GPU's figure is its busiest engine, each engine being the sum over the
+# processes using it: how Task Manager computes it. Every engine used to be
+# added together, a video decode on top of the 3D work beside it and the copy
+# engine on top of both, which overstated the load and could pass 100%.
+#
+# Engines are grouped by adapter LUID. The phys_N they were grouped by before
+# numbers the chips inside one linked adapter, so it is 0 on every ordinary
+# GPU: a laptop's integrated and discrete GPUs were added up and shown as the
+# first one.
+#
+# Returned as "cpu|luid:percent|...". Memoised for the run, so CPU and GPU
+# share one sample even when it cannot be cached.
 function Get-UsageSample {
     if ($null -ne $script:MeowUsage) { return $script:MeowUsage }
     $hit = Get-MeowCache -Key 'usage' -MaxAge $script:MeowSampleTtl
@@ -299,25 +329,31 @@ function Get-UsageSample {
     }
 
     $cpu = ''
-    $usageByGpu = @{}
+    $engineLoad = @{}
     foreach ($sample in @($samples)) {
         if (-not $sample) { continue }
         if ($sample.Path -like '*\processor(_total)\*') {
             $cpu = [string][math]::Min(100, [math]::Max(0, [int][math]::Round($sample.CookedValue)))
             continue
         }
-        if ($sample.CookedValue -lt 0 -or $sample.InstanceName -notmatch 'engtype_') { continue }
-        # Match phys_ last: $matches holds the most recent successful -match.
-        if ($sample.InstanceName -match 'phys_([0-9]+)') {
-            $gpuIndex = [int]$matches[1]
-            if (-not $usageByGpu.ContainsKey($gpuIndex)) { $usageByGpu[$gpuIndex] = 0.0 }
-            $usageByGpu[$gpuIndex] += [double]$sample.CookedValue
+        # pid_1234_luid_0x00000000_0x0000d1b5_phys_0_eng_3_engtype_videodecode
+        if ($sample.CookedValue -lt 0 -or
+            $sample.InstanceName -notmatch 'luid_0x([0-9a-f]+)_0x([0-9a-f]+)_phys_([0-9]+)_eng_([0-9]+)') { continue }
+        $luid = '{0:x8}{1:x8}' -f [Convert]::ToUInt32($matches[1], 16), [Convert]::ToUInt32($matches[2], 16)
+        $engineLoad["$luid/$($matches[3])/$($matches[4])"] += [double]$sample.CookedValue
+    }
+
+    $gpuLoad = @{}
+    foreach ($engine in $engineLoad.Keys) {
+        $luid = $engine.Split('/')[0]
+        if (-not $gpuLoad.ContainsKey($luid) -or $engineLoad[$engine] -gt $gpuLoad[$luid]) {
+            $gpuLoad[$luid] = $engineLoad[$engine]
         }
     }
 
     $parts = @($cpu)
-    foreach ($gpuIndex in ($usageByGpu.Keys | Sort-Object)) {
-        $parts += '{0}:{1}' -f $gpuIndex, [int][math]::Round([math]::Min([double]100, $usageByGpu[$gpuIndex]))
+    foreach ($luid in ($gpuLoad.Keys | Sort-Object)) {
+        $parts += '{0}:{1}' -f $luid, [int][math]::Round([math]::Min([double]100, $gpuLoad[$luid]))
     }
     $script:MeowUsage = $parts -join '|'
     if ($cpu) { Set-MeowCache -Key 'usage' -Value $script:MeowUsage }
@@ -400,55 +436,95 @@ function Get-DiskStats {
     return $results
 }
 
-# Adapter names are fixed hardware, so they are cached. The utilisation counter
-# is another ~1 s Get-Counter call, so it is refreshed only every
-# MEOW_SAMPLE_TTL seconds rather than on every single shell.
-function Get-GpuStats {
-    $gpuStats = @()
-    $nameMap = @{}
-
-    $namesRaw = Get-MeowCached -Key 'gpu_names' -Ttl $script:MeowStaticTtl -Compute {
-        $names = @()
-        try {
-            $controllers = Get-CimInstance Win32_VideoController -Property Name, AdapterRAM |
-                Where-Object { $_.Name -and $_.AdapterRAM -gt 0 }
-            foreach ($c in $controllers) { $names += $c.Name }
-        } catch {
-        }
-        ($names -join '|')
-    }
-
-    $index = 0
-    if ($namesRaw) {
-        foreach ($name in $namesRaw.Split('|')) {
-            if (-not $name) { continue }
-            $nameMap[$index] = $name
-            $gpuStats += [pscustomobject]@{ Index = $index; Name = $name; Usage = $null; Source = 'adapter' }
-            $index++
-        }
-    }
-
-    $usageRaw = (@((Get-UsageSample).Split('|')) | Select-Object -Skip 1) -join '|'
-
-    if ($usageRaw) {
-        foreach ($pair in $usageRaw.Split('|')) {
-            if (-not $pair) { continue }
-            $bits = $pair.Split(':')
-            if ($bits.Count -ne 2) { continue }
-            $gpuIndex = [int]$bits[0]
-            $usage = [int]$bits[1]
-            $existing = $gpuStats | Where-Object { $_.Index -eq $gpuIndex } | Select-Object -First 1
-            if ($existing) {
-                $existing.Usage = $usage
-                $existing.Source = 'counter'
-            } else {
-                $name = if ($nameMap.ContainsKey($gpuIndex)) { $nameMap[$gpuIndex] } else { "GPU $gpuIndex" }
-                $gpuStats += [pscustomobject]@{ Index = $gpuIndex; Name = $name; Usage = $usage; Source = 'counter' }
+# The display adapters in Win32_VideoController order, as "luid=name|...". The
+# LUID is the adapter id the GPU Engine counters are keyed by, read from the
+# device property {60b193cb-5276-4d0f-96fc-f173abad3ec6} 2 as fastfetch does.
+# Windows assigns it when the driver starts, so it holds for one boot at most.
+#
+# Adapters the AdapterRAM filter hides (remote desktop, virtual displays) stay
+# in the list as "luid=", without a name: they get no row, but their LUIDs
+# still tell display adapters apart from the Basic Render Driver, which draws
+# in software on the CPU and has counters of its own without being a GPU.
+#
+# An empty list is an answer (a VM may have no GPU worth showing) and is cached
+# like any other; $null means the query failed, and is not.
+function Get-MeowGpuList {
+    $luidOf = @{}
+    try {
+        $devices = @(Get-CimInstance Win32_PnPEntity -Property DeviceID -ErrorAction Stop `
+                         -Filter "ClassGuid = '{4d36e968-e325-11ce-bfc1-08002be10318}'")
+        foreach ($device in $devices) {
+            try {
+                $reply = Invoke-CimMethod -InputObject $device -MethodName GetDeviceProperties -ErrorAction Stop `
+                             -Arguments @{ devicePropertyKeys = [string[]]@('{60b193cb-5276-4d0f-96fc-f173abad3ec6} 2') }
+                $data = @($reply.deviceProperties)[0].Data
+                if ($null -ne $data) { $luidOf[[string]$device.DeviceID] = '{0:x16}' -f [uint64]$data }
+            } catch {
             }
         }
+    } catch {
     }
 
-    return $gpuStats | Sort-Object Index
+    $entries = @()
+    try {
+        $controllers = Get-CimInstance Win32_VideoController -Property Name, AdapterRAM, PNPDeviceID -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    foreach ($c in @($controllers)) {
+        if (-not $c) { continue }
+        $name = if ($c.Name -and $c.AdapterRAM -gt 0) { ([string]$c.Name).Trim() } else { '' }
+        $luid = [string]$luidOf[[string]$c.PNPDeviceID]
+        if ($name -or $luid) { $entries += '{0}={1}' -f $luid, $name }
+    }
+    return ($entries -join '|')
+}
+
+# The list is cached with the other hardware facts, and so rebuilt every boot.
+# One more check keeps it honest within a boot: a LUID in the counters that it
+# has never seen means an adapter started after it was made, such as a GPU
+# swapped in under Fast Startup (whose shut down does not end the boot) or a
+# reinstalled driver. It is rebuilt then, so a card that is gone does not stay
+# on screen.
+function Get-GpuStats {
+    $load = @{}
+    foreach ($pair in @((Get-UsageSample).Split('|') | Select-Object -Skip 1)) {
+        $bits = $pair.Split(':')
+        if ($bits.Count -eq 2 -and $bits[1] -match '^[0-9]+$') { $load[$bits[0]] = [int]$bits[1] }
+    }
+
+    $list = Get-MeowCache -Key 'gpus' -MaxAge $script:MeowStaticTtl
+    $seen = @([string](Get-MeowCache -Key 'gpu_luids' -MaxAge -1) -split ',' | Where-Object { $_ })
+    $known = $seen + @(([string]$list -split '\|') | ForEach-Object { $_.Split('=')[0] } | Where-Object { $_ })
+    $fresh = @($load.Keys | Where-Object { $known -notcontains $_ })
+    if ($null -eq $list -or $fresh.Count -gt 0) {
+        $list = Get-MeowGpuList
+        if ($null -ne $list) { Set-MeowCache -Key 'gpus' -Value $list }
+        Set-MeowCache -Key 'gpu_luids' -Value ((@($seen) + $fresh | Select-Object -Unique) -join ',')
+    }
+
+    $gpuStats = @()
+    $mapped = $false
+    foreach ($entry in @(([string]$list -split '\|') | Where-Object { $_ })) {
+        $luid, $name = $entry.Split('=', 2)
+        if ($luid) { $mapped = $true }
+        if (-not $name) { continue }
+        $usage = if ($luid -and $load.ContainsKey($luid)) { $load[$luid] } else { $null }
+        $gpuStats += [pscustomobject]@{ Index = $gpuStats.Count; Name = $name; Usage = $usage }
+    }
+
+    # With no LUID to go by, a reading can only be placed when there is just
+    # one GPU it could belong to.
+    if (-not $mapped -and $load.Count -gt 0 -and $gpuStats.Count -le 1) {
+        $busiest = [int]($load.Values | Measure-Object -Maximum).Maximum
+        if ($gpuStats.Count -eq 0) {
+            $gpuStats += [pscustomobject]@{ Index = 0; Name = 'GPU 0'; Usage = $busiest }
+        } else {
+            $gpuStats[0].Usage = $busiest
+        }
+    }
+
+    return $gpuStats
 }
 
 # ---------------------------------------------------------------------------
@@ -456,6 +532,13 @@ function Get-GpuStats {
 # ---------------------------------------------------------------------------
 
 Read-MeowCache
+
+# One query, reused for uptime, memory and the paging file, and first of all to
+# tell whether the cache is from this boot.
+$operatingSystem = Get-CimInstance Win32_OperatingSystem `
+                       -Property LastBootUpTime, TotalVisibleMemorySize, FreePhysicalMemory,
+                                 SizeStoredInPagingFiles, FreeSpaceInPagingFiles
+Set-MeowCacheBoot $operatingSystem.LastBootUpTime
 
 # Windows' counterpart to root is an elevated process ("Run as administrator"),
 # not an account that happens to be named Administrator. That built-in account
@@ -503,11 +586,6 @@ if (-not $chip) { $chip = 'Unknown CPU' }
 $cpuCores = [Environment]::ProcessorCount
 if ($cpuCores -lt 1) { $cpuCores = 1 }
 $cpuCoreText = Format-CpuCoreCount $cpuCores
-
-# One query, reused for uptime, memory and the paging file.
-$operatingSystem = Get-CimInstance Win32_OperatingSystem `
-                       -Property LastBootUpTime, TotalVisibleMemorySize, FreePhysicalMemory,
-                                 SizeStoredInPagingFiles, FreeSpaceInPagingFiles
 
 $ipAddr = Get-PrimaryIPv4
 $uptime = Format-Uptime $operatingSystem.LastBootUpTime
@@ -750,15 +828,19 @@ if ($swap.TotalMB -gt 0) {
     Add-MeowGauge -Label 'Swap Usage:' -Percent $swap.Percent -Detail "($($swap.UsedMB)/$($swap.TotalMB) MB)"
 }
 
+# A GPU without a reading still gets its name, as on macOS.
 if ($gpuStats.Count -eq 1) {
     $gpu = $gpuStats[0]
     if ($null -ne $gpu.Usage) {
         Add-MeowGauge -Label 'GPU Usage:' -Percent $gpu.Usage
+    } else {
+        Add-MeowRow -Label 'GPU:' -Value "${YELLOW}$($gpu.Name)"
     }
 } elseif ($gpuStats.Count -gt 1) {
     foreach ($gpu in $gpuStats) {
         if ($null -ne $gpu.Usage) {
-            Add-MeowGauge -Label "GPU$($gpu.Index):" -Percent $gpu.Usage
+            # With more than one GPU a bare number does not say which card it is.
+            Add-MeowGauge -Label "GPU$($gpu.Index):" -Percent $gpu.Usage -Detail "($($gpu.Name))"
         } else {
             Add-MeowRow -Label "GPU$($gpu.Index):" -Value "${YELLOW}$($gpu.Name)"
         }
