@@ -408,20 +408,64 @@ meow_uptime() {
   meow_format_uptime "$seconds"
 }
 
+# The value after <key> in an iproute2 line ("... dev eth0 src 10.0.0.2"), in
+# REPLY. The line may be several lines; words are split on any whitespace.
+meow_route_field() {
+  local -a words
+  local -i i
+  words=(${=1})
+  REPLY=""
+  for (( i = 1; i < ${#words}; i++ )); do
+    [[ "${words[i]}" == "$2" ]] && { REPLY="${words[i+1]}"; return }
+  done
+}
+
+# Tunnels have no Ethernet link layer: TUN and WireGuard devices are type 65534
+# (ARPHRD_NONE), PPP is 512, IPIP, SIT and GRE are 768, 769, 776, 778 and 823.
+# TAP devices (OpenVPN in tap mode, ZeroTier) do look like Ethernet, so those
+# are recognised by name.
+meow_is_tunnel() {
+  local type=""
+  [[ -r /sys/class/net/$1/type ]] && type="$(</sys/class/net/$1/type)"
+  case "$type" in
+    (65534|512|768|769|776|778|823) return 0 ;;
+  esac
+  case "$1" in
+    (tun*|tap*|wg*|ppp*|zt*|tailscale*|utun*) return 0 ;;
+  esac
+  return 1
+}
+
+# The address traffic leaves from, as the kernel's own route lookup gives it.
+# When that route is a VPN or a TUN-mode proxy (Clash, sing-box, WireGuard,
+# Tailscale), the physical interface's address is shown instead, as the macOS
+# and Windows banners do. Those tools take the traffic with policy rules or
+# narrower routes and leave the main table's default route on the real
+# interface, so that is where it is found. With nothing but the tunnel (PPPoE
+# is often exactly that), the tunnel's own address stays.
 meow_primary_ip() {
-  local out line
-  local -a fields
+  local out line dev src
   REPLY=""
   if (( $+commands[ip] )); then
     out="$(ip -4 route get 1.1.1.1 2>/dev/null)"
-    fields=(${=out})
-    local -i i
-    for (( i = 1; i <= $#fields; i++ )); do
-      if [[ "${fields[i]}" == src && -n "${fields[i+1]-}" ]]; then
-        REPLY="${fields[i+1]}"
-        break
-      fi
-    done
+    meow_route_field "$out" dev; dev="$REPLY"
+    meow_route_field "$out" src; src="$REPLY"
+    if [[ -n "$dev" ]] && meow_is_tunnel "$dev"; then
+      out="$(ip -4 route show default 2>/dev/null)"
+      for line in ${(f)out}; do
+        meow_route_field "$line" dev
+        [[ -n "$REPLY" ]] || continue
+        meow_is_tunnel "$REPLY" && continue
+        dev="$REPLY"
+        meow_route_field "$line" src
+        if [[ -z "$REPLY" ]]; then
+          meow_route_field "$(ip -4 addr show dev "$dev" scope global 2>/dev/null)" inet
+          REPLY="${REPLY%%/*}"
+        fi
+        [[ "$REPLY" == <->.<->.<->.<-> ]] && { src="$REPLY"; break }
+      done
+    fi
+    REPLY="$src"
   fi
   if [[ -z "$REPLY" && -r /proc/net/fib_trie ]]; then
     local prev=""
