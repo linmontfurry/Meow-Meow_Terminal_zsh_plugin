@@ -1,7 +1,33 @@
+# Everything below runs inside an anonymous function, which zsh calls at once.
+#
+# Pasted into .zshrc, or sourced from it, this file would otherwise run at the
+# top level, where "emulate -LR zsh" is not local at all: it reset every option
+# set before it (prompt_subst, the history options, auto_cd, ...) to zsh
+# defaults for the rest of the session, and leaked pipefail with it. Inside a
+# function both stay local and are put back on return.
+#
+# The working variables are local for the same reason. As globals they would
+# overwrite, and the cleanup at the end would then delete, anything of yours
+# with the same name: an exported $ARCH, your own $RED, a $line.
+() {
 emulate -LR zsh
 setopt pipefail
 
+local REPLY ARCH HOST_NAME MODEL_NAME CHIP CPU_CORES CPU_CORE_TEXT CPU_USAGE
+local IP_ADDR UP_TIME BATTERY BAT_VAL BAT_COLOR BAT_TEXT VM_USED VM_TOTAL
+local RAM_PERCENT SWAP_USED SWAP_TOTAL SWAP_PERCENT DISK_USED DISK_TOTAL
+local DISK_PERCENT WELCOME USER_NAME CONNECTION_TYPE LOGIN_IP TTY_INFO GPU_INDEX
+local CAT_1 CAT_2 CAT_1_TAIL CAT_2_TAIL CAT_1_TEXT CAT_2_TEXT line util RESET
+local PINK CYAN YELLOW MAGENTA GREEN ORANGE BLUE DIM LIGHT_GREEN RED MEOW_NOW
+local MEOW_CACHE_DIR MEOW_CACHE_FILE MEOW_CACHE_DIRTY MEOW_I MEOW_GAP
+local MEOW_FACE_GAP MEOW_ART_PAD MEOW_RAM_USED MEOW_RAM_TOTAL MEOW_RAM_PERCENT
+local MEOW_SWAP_USED MEOW_SWAP_TOTAL MEOW_SWAP_PERCENT MEOW_DISK_USED
+local MEOW_DISK_TOTAL MEOW_DISK_PERCENT MEOW_CPU_UNIT
+local -a WELCOMES CAT_ART_1 CAT_ART_2 MEOW_GPU_UTILS
+local -A MEOW_CACHE
+
 zmodload zsh/datetime 2>/dev/null
+zmodload zsh/zselect 2>/dev/null
 
 RESET="\033[0m"
 PINK="\033[1;35m"
@@ -15,7 +41,7 @@ DIM="\033[2m"
 LIGHT_GREEN="\033[38;5;120m"
 RED="\033[1;31m"
 
-cecho() {
+meow_echo() {
   printf '%b\n' "$1"
 }
 
@@ -29,13 +55,12 @@ cecho() {
 # expire on different schedules.
 # ---------------------------------------------------------------------------
 
-MEOW_STATIC_TTL=${MEOW_STATIC_TTL:-604800}   # 7 days  - model, CPU name, ...
-MEOW_SAMPLE_TTL=${MEOW_SAMPLE_TTL:-10}       # 10 s    - costly live samples
+local MEOW_STATIC_TTL=${MEOW_STATIC_TTL:-604800}   # 7 days  - model, CPU name, ...
+local MEOW_SAMPLE_TTL=${MEOW_SAMPLE_TTL:-10}       # 10 s    - costly live samples
 MEOW_NOW=${EPOCHSECONDS:-0}
 [[ "$MEOW_NOW" == <-> ]] || MEOW_NOW="$(date +%s 2>/dev/null)"
 [[ "$MEOW_NOW" == <-> ]] || MEOW_NOW=0
 
-typeset -gA MEOW_CACHE
 MEOW_CACHE=()
 MEOW_CACHE_DIRTY=0
 
@@ -74,8 +99,9 @@ meow_cache_get() {
   return 0
 }
 
+# One record per line in the file, so a value never carries a newline.
 meow_cache_set() {
-  MEOW_CACHE[$1]="${MEOW_NOW} $2"
+  MEOW_CACHE[$1]="${MEOW_NOW} ${2//$'\n'/ }"
   MEOW_CACHE_DIRTY=1
 }
 
@@ -101,6 +127,25 @@ meow_cached() {
   # pinning "Unknown CPU" in place for a week.
   [[ -n "$REPLY" ]] && meow_cache_set "$key" "$REPLY"
   return 0
+}
+
+# Hardware only changes across a power cycle, so everything cached belongs to
+# the boot it was measured in. A new boot starts from an empty cache: a swapped
+# CPU, GPU or memory shows up in the first shell after the machine comes back,
+# instead of up to MEOW_STATIC_TTL later.
+#
+# $1 is an opaque boot id, or the boot time in epoch seconds. The kernel moves
+# the boot time whenever the clock is stepped (NTP after a wake from sleep, a
+# manual change), so boot times under a minute apart are the same boot. No
+# power cycle long enough to swap a part is that short.
+meow_cache_bind_boot() {
+  [[ -n "$1" && "$1" != 0 ]] || return 0
+  if meow_cache_get boot -1; then
+    [[ "$REPLY" == "$1" ]] && return 0
+    [[ "$REPLY" == <-> && "$1" == <-> ]] && (( REPLY - $1 < 60 && $1 - REPLY < 60 )) && return 0
+  fi
+  MEOW_CACHE=()
+  meow_cache_set boot "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -219,6 +264,20 @@ meow_arch() {
   [[ -n "$REPLY" ]] || REPLY="unknown-arch"
 }
 
+# A value unique to this boot. boot_id changes on every boot and is read
+# straight from the kernel; the boot time is the fallback for kernels without
+# it.
+meow_boot_id() {
+  local key value
+  REPLY=""
+  [[ -r /proc/sys/kernel/random/boot_id ]] && REPLY="$(</proc/sys/kernel/random/boot_id)"
+  if [[ -z "$REPLY" && -r /proc/stat ]]; then
+    while read -r key value; do
+      [[ "$key" == btime ]] && { REPLY="${value%% *}"; break; }
+    done < /proc/stat
+  fi
+}
+
 meow_hostname() {
   REPLY="${HOST:-}"
   [[ -n "$REPLY" ]] || { [[ -r /proc/sys/kernel/hostname ]] && REPLY="$(</proc/sys/kernel/hostname)" }
@@ -238,6 +297,8 @@ meow_model_name() {
   for path in $sources; do
     [[ -r "$path" ]] || continue
     REPLY="$(<$path)"
+    # Device-tree strings end in a NUL byte, which would otherwise be printed.
+    REPLY="${REPLY//$'\0'/}"
     REPLY="${REPLY%%$'\n'*}"
     meow_trim "$REPLY"
     [[ -n "$REPLY" ]] && return
@@ -274,35 +335,69 @@ meow_cpu_model() {
   fi
 }
 
+# Physical cores. Each online CPU's thread_siblings_list names the logical
+# CPUs that share its core ("0,6" with SMT, "3" without), so the number of
+# distinct lists is the number of cores. That holds on big.LITTLE and hybrid
+# parts too, where core_id starts over in every cluster and cannot be counted
+# on its own. Offline CPUs are left out, as in the /proc/stat totals.
+#
+# Answers in REPLY, and MEOW_CPU_UNIT says what it counts: "cores", or
+# "threads" when the kernel exposes no topology at all and only the logical
+# CPUs can be counted.
 meow_cpu_cores() {
-  local raw part lo hi
-  local -i total=0
-  if [[ -r /sys/devices/system/cpu/present ]]; then
-    raw="$(</sys/devices/system/cpu/present)"
+  local raw part siblings key value phys=""
+  local -i lo hi n logical=0 procs=0
+  local -A cores
+  REPLY="" MEOW_CPU_UNIT=cores
+  if [[ -r /sys/devices/system/cpu/online ]]; then
+    raw="$(</sys/devices/system/cpu/online)"
     raw="${raw//[[:space:]]/}"
     for part in ${(s:,:)raw}; do
-      if [[ "$part" == *-* ]]; then
-        lo="${part%%-*}"; hi="${part##*-}"
-        [[ "$lo" == <-> && "$hi" == <-> ]] && (( total += hi - lo + 1 ))
+      if [[ "$part" == <->-<-> ]]; then
+        lo=${part%%-*} hi=${part##*-}
       elif [[ "$part" == <-> ]]; then
-        (( total++ ))
+        lo=$part hi=$part
+      else
+        continue
       fi
+      for (( n = lo; n <= hi; n++ )); do
+        (( logical++ ))
+        for key in thread_siblings_list core_cpus_list; do
+          [[ -r /sys/devices/system/cpu/cpu$n/topology/$key ]] || continue
+          siblings="$(</sys/devices/system/cpu/cpu$n/topology/$key)"
+          [[ -n "$siblings" ]] && cores[$siblings]=1
+          break
+        done
+      done
     done
   fi
-  if (( total <= 0 )) && [[ -r /proc/cpuinfo ]]; then
-    local key value
+  # No sysfs topology (some containers): on x86, /proc/cpuinfo still gives
+  # every logical CPU a physical id and a core id.
+  if (( ${#cores} == 0 )) && [[ -r /proc/cpuinfo ]]; then
     while IFS=: read -r key value; do
       key="${key//[[:space:]]/}"
-      [[ "$key" == processor ]] && (( total++ ))
+      value="${value//[[:space:]]/}"
+      case "$key" in
+        (processor)  (( procs++ )); phys="" ;;
+        (physicalid) phys="$value" ;;
+        (coreid)     [[ -n "$phys" ]] && cores[$phys:$value]=1 ;;
+      esac
     done < /proc/cpuinfo
+    (( logical > 0 )) || logical=$procs
   fi
-  if (( total > 0 )); then REPLY=$total; else REPLY=""; fi
+  if (( ${#cores} > 0 )); then
+    REPLY=${#cores}
+  elif (( logical > 0 )); then
+    REPLY=$logical MEOW_CPU_UNIT=threads
+  fi
 }
 
+# meow_format_cores <count> [unit]  ->  "1 core", "8 cores", "16 threads"
 meow_format_cores() {
-  local -i cores=${1:-1}
-  (( cores > 0 )) || cores=1
-  if (( cores == 1 )); then REPLY="1 core"; else REPLY="${cores} cores"; fi
+  local -i count=${1:-0}
+  local unit="${2:-cores}"
+  (( count == 1 )) && unit="${unit%s}"
+  REPLY="$count $unit"
 }
 
 meow_uptime() {
@@ -315,20 +410,64 @@ meow_uptime() {
   meow_format_uptime "$seconds"
 }
 
+# The value after <key> in an iproute2 line ("... dev eth0 src 10.0.0.2"), in
+# REPLY. The line may be several lines; words are split on any whitespace.
+meow_route_field() {
+  local -a words
+  local -i i
+  words=(${=1})
+  REPLY=""
+  for (( i = 1; i < ${#words}; i++ )); do
+    [[ "${words[i]}" == "$2" ]] && { REPLY="${words[i+1]}"; return }
+  done
+}
+
+# Tunnels have no Ethernet link layer: TUN and WireGuard devices are type 65534
+# (ARPHRD_NONE), PPP is 512, IPIP, SIT and GRE are 768, 769, 776, 778 and 823.
+# TAP devices (OpenVPN in tap mode, ZeroTier) do look like Ethernet, so those
+# are recognised by name.
+meow_is_tunnel() {
+  local type=""
+  [[ -r /sys/class/net/$1/type ]] && type="$(</sys/class/net/$1/type)"
+  case "$type" in
+    (65534|512|768|769|776|778|823) return 0 ;;
+  esac
+  case "$1" in
+    (tun*|tap*|wg*|ppp*|zt*|tailscale*|utun*) return 0 ;;
+  esac
+  return 1
+}
+
+# The address traffic leaves from, as the kernel's own route lookup gives it.
+# When that route is a VPN or a TUN-mode proxy (Clash, sing-box, WireGuard,
+# Tailscale), the physical interface's address is shown instead, as the macOS
+# and Windows banners do. Those tools take the traffic with policy rules or
+# narrower routes and leave the main table's default route on the real
+# interface, so that is where it is found. With nothing but the tunnel (PPPoE
+# is often exactly that), the tunnel's own address stays.
 meow_primary_ip() {
-  local out line
-  local -a fields
+  local out line dev src
   REPLY=""
   if (( $+commands[ip] )); then
     out="$(ip -4 route get 1.1.1.1 2>/dev/null)"
-    fields=(${=out})
-    local -i i
-    for (( i = 1; i <= $#fields; i++ )); do
-      if [[ "${fields[i]}" == src && -n "${fields[i+1]-}" ]]; then
-        REPLY="${fields[i+1]}"
-        break
-      fi
-    done
+    meow_route_field "$out" dev; dev="$REPLY"
+    meow_route_field "$out" src; src="$REPLY"
+    if [[ -n "$dev" ]] && meow_is_tunnel "$dev"; then
+      out="$(ip -4 route show default 2>/dev/null)"
+      for line in ${(f)out}; do
+        meow_route_field "$line" dev
+        [[ -n "$REPLY" ]] || continue
+        meow_is_tunnel "$REPLY" && continue
+        dev="$REPLY"
+        meow_route_field "$line" src
+        if [[ -z "$REPLY" ]]; then
+          meow_route_field "$(ip -4 addr show dev "$dev" scope global 2>/dev/null)" inet
+          REPLY="${REPLY%%/*}"
+        fi
+        [[ "$REPLY" == <->.<->.<->.<-> ]] && { src="$REPLY"; break }
+      done
+    fi
+    REPLY="$src"
   fi
   if [[ -z "$REPLY" && -r /proc/net/fib_trie ]]; then
     local prev=""
@@ -365,6 +504,9 @@ meow_battery() {
 }
 
 # free(1) is procps and its output differs on BusyBox, so read the kernel file.
+# Percentages are rounded, not truncated: (200a + b) / 2b is round-half-up in
+# integer arithmetic. Truncating showed 40% where fastfetch, and this banner on
+# Windows, showed 41-42% for the same memory.
 meow_memory() {
   local key value
   local -i total=0 available=0 free=0 buffers=0 cached=0 reclaimable=0
@@ -397,15 +539,15 @@ meow_memory() {
   (( used < 0 )) && used=0
   MEOW_RAM_TOTAL=$(( total / 1024 ))
   MEOW_RAM_USED=$(( used / 1024 ))
-  (( MEOW_RAM_TOTAL > 0 )) && MEOW_RAM_PERCENT=$(( MEOW_RAM_USED * 100 / MEOW_RAM_TOTAL ))
+  (( MEOW_RAM_TOTAL > 0 )) && MEOW_RAM_PERCENT=$(( (200 * MEOW_RAM_USED + MEOW_RAM_TOTAL) / (2 * MEOW_RAM_TOTAL) ))
   MEOW_SWAP_TOTAL=$(( swap_total / 1024 ))
   MEOW_SWAP_USED=$(( (swap_total - swap_free) / 1024 ))
-  (( MEOW_SWAP_TOTAL > 0 )) && MEOW_SWAP_PERCENT=$(( MEOW_SWAP_USED * 100 / MEOW_SWAP_TOTAL ))
+  (( MEOW_SWAP_TOTAL > 0 )) && MEOW_SWAP_PERCENT=$(( (200 * MEOW_SWAP_USED + MEOW_SWAP_TOTAL) / (2 * MEOW_SWAP_TOTAL) ))
 }
 
 # -P -k is the POSIX spelling: -m is a GNU extension BusyBox may not carry, and
 # -P keeps long device names from wrapping onto a second line.
-meow_disk() {
+meow_disk_probe() {
   local out line
   local -a fields
   MEOW_DISK_USED=0 MEOW_DISK_TOTAL=1 MEOW_DISK_PERCENT=0
@@ -418,35 +560,68 @@ meow_disk() {
   MEOW_DISK_TOTAL=$(( fields[2] / 1024 ))
   MEOW_DISK_USED=$(( fields[3] / 1024 ))
   (( MEOW_DISK_TOTAL > 0 )) || MEOW_DISK_TOTAL=1
-  MEOW_DISK_PERCENT=$(( MEOW_DISK_USED * 100 / MEOW_DISK_TOTAL ))
+  MEOW_DISK_PERCENT=$(( (200 * MEOW_DISK_USED + MEOW_DISK_TOTAL) / (2 * MEOW_DISK_TOTAL) ))
 }
 
-# Two readings of /proc/stat are needed for a real percentage; the previous one
-# is kept in the same cache file the hardware facts live in.
-meow_cpu_usage() {
-  local cpu user nice system idle iowait irq softirq steal rest
-  local -i idle_now total_now total_prev=0 idle_prev=0 usage=0 total_delta idle_delta
-  REPLY=0
+# Disk usage moves slowly, and df is the one process this banner cannot avoid,
+# so its answer is reused for MEOW_SAMPLE_TTL seconds like the other samples.
+meow_disk() {
+  local -a fields
+  if meow_cache_get disk $MEOW_SAMPLE_TTL; then
+    fields=(${=REPLY})
+    if (( ${#fields} == 3 )); then
+      MEOW_DISK_USED=${fields[1]} MEOW_DISK_TOTAL=${fields[2]} MEOW_DISK_PERCENT=${fields[3]}
+      return
+    fi
+  fi
+  meow_disk_probe
+  (( MEOW_DISK_TOTAL > 1 )) && meow_cache_set disk "$MEOW_DISK_USED $MEOW_DISK_TOTAL $MEOW_DISK_PERCENT"
+}
+
+# "busy total" from the first line of /proc/stat, in REPLY. Busy is user,
+# nice, system, irq and softirq; total adds idle and iowait. Steal, the time a
+# hypervisor handed to another guest, is neither. The same split fastfetch
+# uses.
+meow_cpu_ticks() {
+  local cpu user nice system idle iowait irq softirq rest
+  local -i busy
+  REPLY=""
   [[ -r /proc/stat ]] || return
-  read -r cpu user nice system idle iowait irq softirq steal rest < /proc/stat
-  [[ "$user" == <-> && "$idle" == <-> ]] || return
-  idle_now=$(( idle + iowait ))
-  total_now=$(( user + nice + system + idle + iowait + irq + softirq + steal ))
-  if meow_cache_get cpu_sample -1; then
-    total_prev="${REPLY%% *}"
-    idle_prev="${REPLY##* }"
-  fi
-  meow_cache_set cpu_sample "${total_now} ${idle_now}"
-  if (( total_prev > 0 && total_now > total_prev )); then
-    total_delta=$(( total_now - total_prev ))
-    idle_delta=$(( idle_now - idle_prev ))
-    usage=$(( (100 * (total_delta - idle_delta)) / total_delta ))
-  elif (( total_now > 0 )); then
-    usage=$(( (100 * (total_now - idle_now)) / total_now ))
-  fi
+  read -r cpu user nice system idle iowait irq softirq rest < /proc/stat
+  [[ "$cpu" == cpu && "$user" == <-> && "$idle" == <-> ]] || return
+  busy=$(( user + nice + system + ${irq:-0} + ${softirq:-0} ))
+  REPLY="$busy $(( busy + idle + ${iowait:-0} ))"
+}
+
+# CPU usage right now: two readings 200 ms apart, the window fastfetch samples
+# over. The wait is zselect, a builtin, so this shell sleeps through the window
+# rather than being counted in it. The answer is kept for MEOW_SAMPLE_TTL
+# seconds, so tabs opened together share one reading and one wait.
+#
+# This used to compare against the reading the previous shell left in the
+# cache, which made the figure the average over however long ago that shell
+# was: a whole afternoon, for the first terminal after lunch.
+meow_cpu_usage_raw() {
+  local -i busy1 total1 busy2 total2 usage
+  REPLY=""
+  meow_cpu_ticks; [[ -n "$REPLY" ]] || return
+  busy1=${REPLY% *} total1=${REPLY#* }
+  if (( $+builtins[zselect] )); then zselect -t 20; else sleep 0.2 2>/dev/null; fi
+  meow_cpu_ticks; [[ -n "$REPLY" ]] || return
+  busy2=${REPLY% *} total2=${REPLY#* }
+  REPLY=""
+  (( total2 > total1 )) || return
+  usage=$(( (200 * (busy2 - busy1) + (total2 - total1)) / (2 * (total2 - total1)) ))
   (( usage < 0 )) && usage=0
   (( usage > 100 )) && usage=100
   REPLY=$usage
+}
+
+# Empty when there is nothing to measure (no readable /proc/stat), so the
+# banner can say N/A instead of a made-up 0%.
+meow_cpu_usage() {
+  meow_cached cpu_usage $MEOW_SAMPLE_TTL meow_cpu_usage_raw
+  [[ "$REPLY" == <-> ]] || REPLY=""
 }
 
 meow_gpu_utils() {
@@ -476,11 +651,28 @@ meow_gpu_utils() {
   meow_cache_set gpu_utils "${(j: :)MEOW_GPU_UTILS}"
 }
 
-meow_parent_comm() {
+# The daemon a login came through, if it was telnet or rlogin. The chain there
+# is telnetd -> login -> shell, so the shell's parent is login and the daemon is
+# one step further up; only a telnetd told to start the shell itself (BusyBox
+# "telnetd -l /bin/zsh") is the parent. The old check looked at the parent alone
+# and so could never fire under a normal telnetd. Two /proc reads, no process.
+meow_login_daemon() {
+  local pid=$PPID comm stat
+  local -i depth
   REPLY=""
-  [[ -r "/proc/$PPID/comm" ]] && REPLY="$(</proc/$PPID/comm)"
-  [[ -n "$REPLY" ]] || REPLY="$(ps -o comm= -p $PPID 2>/dev/null)"
-  REPLY="${REPLY%%$'\n'*}"
+  for (( depth = 0; depth < 2; depth++ )); do
+    [[ -r /proc/$pid/comm ]] || return
+    comm="$(</proc/$pid/comm)"
+    case "$comm" in
+      (*telnet*|*rlogin*) REPLY="$comm"; return ;;
+    esac
+    [[ -r /proc/$pid/stat ]] || return
+    # "pid (comm) state ppid ...". comm may contain spaces, so split after ")".
+    stat="$(</proc/$pid/stat)"
+    stat="${stat##*) }"
+    pid="${${(s: :)stat}[2]}"
+    [[ "$pid" == <-> && "$pid" != [01] ]] || return
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -488,6 +680,7 @@ meow_parent_comm() {
 # ---------------------------------------------------------------------------
 
 meow_cache_load
+meow_boot_id; meow_cache_bind_boot "$REPLY"
 
 meow_hostname;   HOST_NAME="$REPLY"
 
@@ -500,10 +693,12 @@ meow_cached cpu_model $MEOW_STATIC_TTL meow_cpu_model
 CHIP="$REPLY"
 [[ -n "$CHIP" ]] || CHIP="Unknown CPU"
 
-meow_cached cpu_cores $MEOW_STATIC_TTL meow_cpu_cores
+meow_cpu_cores
 CPU_CORES="$REPLY"
-[[ "$CPU_CORES" == <-> ]] || CPU_CORES=1
-meow_format_cores "$CPU_CORES"; CPU_CORE_TEXT="$REPLY"
+CPU_CORE_TEXT=""
+if [[ "$CPU_CORES" == <-> ]] && (( CPU_CORES > 0 )); then
+  meow_format_cores "$CPU_CORES" "$MEOW_CPU_UNIT"; CPU_CORE_TEXT="($REPLY)"
+fi
 
 meow_primary_ip; IP_ADDR="$REPLY"
 meow_uptime;     UP_TIME="$REPLY"
@@ -590,12 +785,15 @@ WELCOMES=(
 
 WELCOME="${WELCOMES[$(( (RANDOM % ${#WELCOMES[@]}) + 1 ))]}"
 
-cecho ""
-cecho "${BLUE}Welcome to Meow-Meow Terminal!${RESET}"
-cecho "${CYAN}Cat says:${RESET} ${ORANGE}${WELCOME}${RESET}"
-cecho ""
+meow_echo ""
+meow_echo "${BLUE}Welcome to Meow-Meow Terminal!${RESET}"
+meow_echo "${CYAN}Cat says:${RESET} ${ORANGE}${WELCOME}${RESET}"
+meow_echo ""
 
-if [[ "$USER" == "root" ]]; then
+# Root is the effective uid, not $USER. su keeps the caller's USER when the
+# target is root (util-linux and BSD su alike), and containers often set no
+# USER at all, so both used to get the ordinary cat and an empty name.
+if (( EUID == 0 )); then
   CAT_1=$'   /\\_/\\\\\n  ( ⊙ʌ⊙ )'
   CAT_2=$'    /\\_/\\\\\n   ( ⊙ʌ⊙ )'
   CAT_1_TAIL=' ʔ/ づ づ'
@@ -629,18 +827,18 @@ for (( MEOW_I = 1; MEOW_I <= ${#MEOW_FACE_L}; MEOW_I++ )); do
   printf '%b%s%b\n' "${MEOW_FACE_L[MEOW_I]}" "$MEOW_GAP" "${MEOW_FACE_R[MEOW_I]-}"
 done
 
-cecho ""
+meow_echo ""
 
-if [[ "$USER" == "root" ]]; then
+if (( EUID == 0 )); then
   USER_NAME="${RED}powerful master${RESET}"
-  cecho "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}... oh no!${RESET}"
-  cecho "${RED}Cat is scared!${RESET}"
-  cecho "${YELLOW}Please do not delete the system, ${RED}powerful master${YELLOW}...${RESET}"
-  cecho "${YELLOW}rm -rf / is not a toy. That is not fun!${RESET}"
-  cecho "${CYAN}Cat hides behind the keyboard... ${RED}please do not delete meow.${RESET}"
+  meow_echo "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}... oh no!${RESET}"
+  meow_echo "${RED}Cat is scared!${RESET}"
+  meow_echo "${YELLOW}Please do not delete the system, ${RED}powerful master${YELLOW}...${RESET}"
+  meow_echo "${YELLOW}rm -rf / is not a toy. That is not fun!${RESET}"
+  meow_echo "${CYAN}Cat hides behind the keyboard... ${RED}please do not delete meow.${RESET}"
 else
   USER_NAME="${YELLOW}${USER}${RESET}"
-  cecho "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}, noted!${RESET}"
+  meow_echo "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}, noted!${RESET}"
 fi
 
 CONNECTION_TYPE=""
@@ -651,8 +849,8 @@ if [[ -n "$SSH_CONNECTION" || -n "$SSH_CLIENT" || -n "$SSH_TTY" ]]; then
   LOGIN_IP="${${=SSH_CONNECTION}[1]}"
   [[ -n "$LOGIN_IP" ]] || LOGIN_IP="${${=SSH_CLIENT}[1]}"
 else
-  meow_parent_comm
-  if [[ "$REPLY" == *telnet* || "$REPLY" == *rlogin* ]]; then
+  meow_login_daemon
+  if [[ -n "$REPLY" ]]; then
     CONNECTION_TYPE="telnet"
     LOGIN_IP="${${=$(who am i 2>/dev/null)}[-1]}"
     LOGIN_IP="${LOGIN_IP//[()]/}"
@@ -667,20 +865,20 @@ fi
 
 if [[ -n "$CONNECTION_TYPE" ]]; then
   if [[ -n "$LOGIN_IP" ]]; then
-    cecho "${CYAN}Cat noticed: you connected via ${MAGENTA}${CONNECTION_TYPE}${CYAN} from ${YELLOW}${LOGIN_IP}${CYAN}, is this you?${RESET}"
+    meow_echo "${CYAN}Cat noticed: you connected via ${MAGENTA}${CONNECTION_TYPE}${CYAN} from ${YELLOW}${LOGIN_IP}${CYAN}, is this you?${RESET}"
   else
-    cecho "${CYAN}Cat noticed: you connected via ${MAGENTA}${CONNECTION_TYPE}${CYAN} from ${YELLOW}somewhere mysterious${CYAN}...${RESET}"
+    meow_echo "${CYAN}Cat noticed: you connected via ${MAGENTA}${CONNECTION_TYPE}${CYAN} from ${YELLOW}somewhere mysterious${CYAN}...${RESET}"
   fi
 else
   TTY_INFO="${TTY:-}"
   [[ -n "$TTY_INFO" ]] || TTY_INFO="$(tty 2>/dev/null)"
   [[ -n "$TTY_INFO" ]] && TTY_INFO="${YELLOW}${TTY_INFO}${RESET}" || TTY_INFO="${YELLOW}unknown${RESET}"
-  cecho "${CYAN}Cat noticed: you're on local terminal ${TTY_INFO}${RESET}"
+  meow_echo "${CYAN}Cat noticed: you're on local terminal ${TTY_INFO}${RESET}"
 fi
 
-cecho "${CYAN}Cat sniffed the machine: hostname ${YELLOW}${HOST_NAME}${RESET}"
-cecho "${CYAN}Cat checked your primary IP: ${YELLOW}${IP_ADDR}${RESET}"
-cecho "${CYAN}Cat checked the uptime: ${YELLOW}${UP_TIME}${RESET}"
+meow_echo "${CYAN}Cat sniffed the machine: hostname ${YELLOW}${HOST_NAME}${RESET}"
+meow_echo "${CYAN}Cat checked your primary IP: ${YELLOW}${IP_ADDR}${RESET}"
+meow_echo "${CYAN}Cat checked the uptime: ${YELLOW}${UP_TIME}${RESET}"
 
 if [[ -n "$BATTERY" ]]; then
   BAT_VAL=${BATTERY%\%}
@@ -696,10 +894,10 @@ if [[ -n "$BATTERY" ]]; then
     BAT_TEXT="Battery looks healthy. Have a nice meowing day!"
   fi
 
-  cecho "${CYAN}Battery level: ${BAT_COLOR}${BATTERY}${CYAN}, ${BAT_TEXT}${RESET}"
+  meow_echo "${CYAN}Battery level: ${BAT_COLOR}${BATTERY}${CYAN}, ${BAT_TEXT}${RESET}"
 fi
 
-cecho ""
+meow_echo ""
 
 CAT_ART_1=(
 "       I'm hungry!  "
@@ -747,7 +945,11 @@ INFO_LINES+=("${BLUE}${MODEL_NAME}${RESET}")
 INFO_LINES+=("${DIM}CPU:${RESET} ${YELLOW}${CHIP}${RESET} ${DIM}(${ARCH})${RESET}")
 INFO_LINES+=("${DIM}User:${RESET} ${LIGHT_GREEN}${USER}${RESET}@${LIGHT_GREEN}${HOST_NAME}${RESET}")
 INFO_LINES+=("${DIM}========================================${RESET}")
-meow_gauge "CPU Usage:"  "$CPU_USAGE"    "(${CPU_CORE_TEXT})"
+if [[ -n "$CPU_USAGE" ]]; then
+  meow_gauge "CPU Usage:" "$CPU_USAGE" "$CPU_CORE_TEXT"
+else
+  meow_row "CPU Usage:" "N/A${CPU_CORE_TEXT:+ $CPU_CORE_TEXT}"
+fi
 meow_gauge "RAM Usage:"  "$RAM_PERCENT"  "(${VM_USED}/${VM_TOTAL} MB)"
 meow_gauge "Disk Usage:" "$DISK_PERCENT" "(${DISK_USED}/${DISK_TOTAL} MB)"
 if (( SWAP_TOTAL > 0 )); then
@@ -781,27 +983,19 @@ for (( row_index = 1; row_index <= row_count; row_index++ )); do
   printf '%b %b\n' "${DEVICE_ART[row_index]:-$MEOW_ART_PAD}" "${INFO_LINES[row_index]:-}"
 done
 
-cecho ""
-cecho "${DIM}============================================================${RESET}"
-cecho ""
+meow_echo ""
+meow_echo "${DIM}============================================================${RESET}"
+meow_echo ""
 
 meow_cache_save
 
-unfunction -m 'meow_*' cecho 2>/dev/null
-unset -m 'MEOW_*' 2>/dev/null
-unset RESET PINK CYAN YELLOW MAGENTA GREEN ORANGE BLUE DIM LIGHT_GREEN RED \
-      HOST_NAME ARCH MODEL_NAME CHIP CPU_CORES CPU_CORE_TEXT IP_ADDR UP_TIME \
-      BATTERY CPU_USAGE VM_USED VM_TOTAL RAM_PERCENT SWAP_USED SWAP_TOTAL \
-      SWAP_PERCENT DISK_USED DISK_TOTAL DISK_PERCENT WELCOMES WELCOME \
-      CAT_1 CAT_2 CAT_1_TAIL CAT_2_TAIL CAT_1_TEXT CAT_2_TEXT USER_NAME \
-      CONNECTION_TYPE LOGIN_IP TTY_INFO BAT_VAL BAT_COLOR BAT_TEXT \
-      CPU_BAR RAM_BAR DISK_BAR SWAP_BAR GPU_BAR \
-      CPU_COLOR RAM_COLOR DISK_COLOR SWAP_COLOR GPU_COLOR GPU_INDEX \
-      CAT_ART_1 CAT_ART_2 RAW_ART DEVICE_ART INFO_LINES art_index row_index row_count \
-      line util 2>/dev/null
+# Functions are always global in zsh, so they are removed by hand. Every
+# variable above is local and goes away on its own when this function returns.
+unfunction -m 'meow_*' 2>/dev/null
 
 if (( $+commands[fastfetch] )); then
   fastfetch
 else
   printf '%b\n' "\033[38;5;201mfastfetch not installed\033[0m"
 fi
+}
