@@ -1,5 +1,32 @@
+# Everything below runs inside an anonymous function, which zsh calls at once.
+#
+# Pasted into .zshrc, or sourced from it, this file would otherwise run at the
+# top level, where "emulate -LR zsh" is not local at all: it reset every option
+# set before it (prompt_subst, the history options, auto_cd, ...) to zsh
+# defaults for the rest of the session, and leaked pipefail with it. Inside a
+# function both stay local and are put back on return.
+#
+# The working variables are local for the same reason. As globals they would
+# overwrite, and the cleanup at the end would then delete, anything of yours
+# with the same name: an exported $ARCH, your own $RED, a $line.
+() {
 emulate -LR zsh
 setopt pipefail
+
+local REPLY ARCH HOST_NAME MODEL_NAME CHIP CPU_CORES CPU_CORE_TEXT CPU_USAGE
+local IP_ADDR UP_TIME BATTERY BAT_VAL BAT_COLOR BAT_TEXT VM_USED VM_TOTAL
+local RAM_PERCENT SWAP_USED SWAP_TOTAL SWAP_PERCENT DISK_USED DISK_TOTAL
+local DISK_PERCENT WELCOME USER_NAME CONNECTION_TYPE LOGIN_IP TTY_INFO GPU_INDEX
+local CAT_1 CAT_2 CAT_1_TAIL CAT_2_TAIL CAT_1_TEXT CAT_2_TEXT line util RESET
+local PINK CYAN YELLOW MAGENTA GREEN ORANGE BLUE DIM LIGHT_GREEN RED MEOW_NOW
+local MEOW_CACHE_DIR MEOW_CACHE_FILE MEOW_CACHE_DIRTY MEOW_I MEOW_GAP
+local MEOW_FACE_GAP MEOW_ART_PAD MEOW_RAM_USED MEOW_RAM_TOTAL MEOW_RAM_PERCENT
+local MEOW_SWAP_USED MEOW_SWAP_TOTAL MEOW_SWAP_PERCENT MEOW_DISK_USED
+local MEOW_DISK_TOTAL MEOW_DISK_PERCENT MEM_PRESSURE RAM_USED RAM_TOTAL
+local MEOW_MAC_MODEL MEOW_MAC_CHIP MEOW_SYS_CORES MEOW_SYS_MEMBYTES
+local MEOW_SYS_BOOTSEC MEOW_SYS_SWAP
+local -a WELCOMES CAT_ART_1 CAT_ART_2 MEOW_GPU_NAMES
+local -A MEOW_CACHE
 
 zmodload zsh/datetime 2>/dev/null
 zmodload zsh/zselect 2>/dev/null
@@ -16,7 +43,7 @@ DIM="\033[2m"
 LIGHT_GREEN="\033[38;5;120m"
 RED="\033[1;31m"
 
-cecho() {
+meow_echo() {
   printf '%b\n' "$1"
 }
 
@@ -30,13 +57,12 @@ cecho() {
 # expire on different schedules.
 # ---------------------------------------------------------------------------
 
-MEOW_STATIC_TTL=${MEOW_STATIC_TTL:-604800}   # 7 days  - model, CPU name, ...
-MEOW_SAMPLE_TTL=${MEOW_SAMPLE_TTL:-10}       # 10 s    - costly live samples
+local MEOW_STATIC_TTL=${MEOW_STATIC_TTL:-604800}   # 7 days  - model, CPU name, ...
+local MEOW_SAMPLE_TTL=${MEOW_SAMPLE_TTL:-10}       # 10 s    - costly live samples
 MEOW_NOW=${EPOCHSECONDS:-0}
 [[ "$MEOW_NOW" == <-> ]] || MEOW_NOW="$(date +%s 2>/dev/null)"
 [[ "$MEOW_NOW" == <-> ]] || MEOW_NOW=0
 
-typeset -gA MEOW_CACHE
 MEOW_CACHE=()
 MEOW_CACHE_DIRTY=0
 
@@ -631,10 +657,10 @@ WELCOMES=(
 
 WELCOME="${WELCOMES[$(( (RANDOM % ${#WELCOMES[@]}) + 1 ))]}"
 
-cecho ""
-cecho "${BLUE}Welcome to Meow-Meow Terminal!${RESET}"
-cecho "${CYAN}Cat says:${RESET} ${ORANGE}${WELCOME}${RESET}"
-cecho ""
+meow_echo ""
+meow_echo "${BLUE}Welcome to Meow-Meow Terminal!${RESET}"
+meow_echo "${CYAN}Cat says:${RESET} ${ORANGE}${WELCOME}${RESET}"
+meow_echo ""
 
 if [[ "$USER" == "root" ]]; then
   CAT_1=$'   /\\_/\\\\\n  ( ⊙ʌ⊙ )'
@@ -670,18 +696,18 @@ for (( MEOW_I = 1; MEOW_I <= ${#MEOW_FACE_L}; MEOW_I++ )); do
   printf '%b%s%b\n' "${MEOW_FACE_L[MEOW_I]}" "$MEOW_GAP" "${MEOW_FACE_R[MEOW_I]-}"
 done
 
-cecho ""
+meow_echo ""
 
 if [[ "$USER" == "root" ]]; then
   USER_NAME="${RED}powerful master${RESET}"
-  cecho "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}... oh no!${RESET}"
-  cecho "${RED}Cat is scared!${RESET}"
-  cecho "${YELLOW}Please do not delete the system, ${RED}powerful master${YELLOW}...${RESET}"
-  cecho "${YELLOW}rm -rf / is not a toy. That is not fun!${RESET}"
-  cecho "${CYAN}Cat hides behind the keyboard... ${RED}please do not delete meow.${RESET}"
+  meow_echo "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}... oh no!${RESET}"
+  meow_echo "${RED}Cat is scared!${RESET}"
+  meow_echo "${YELLOW}Please do not delete the system, ${RED}powerful master${YELLOW}...${RESET}"
+  meow_echo "${YELLOW}rm -rf / is not a toy. That is not fun!${RESET}"
+  meow_echo "${CYAN}Cat hides behind the keyboard... ${RED}please do not delete meow.${RESET}"
 else
   USER_NAME="${YELLOW}${USER}${RESET}"
-  cecho "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}, noted!${RESET}"
+  meow_echo "${CYAN}Cat whispers: your username is ${USER_NAME}${CYAN}, noted!${RESET}"
 fi
 
 CONNECTION_TYPE=""
@@ -705,20 +731,20 @@ fi
 
 if [[ -n "$CONNECTION_TYPE" ]]; then
   if [[ -n "$LOGIN_IP" ]]; then
-    cecho "${CYAN}Cat noticed: you connected via ${MAGENTA}${CONNECTION_TYPE}${CYAN} from ${YELLOW}${LOGIN_IP}${CYAN}, is this you?${RESET}"
+    meow_echo "${CYAN}Cat noticed: you connected via ${MAGENTA}${CONNECTION_TYPE}${CYAN} from ${YELLOW}${LOGIN_IP}${CYAN}, is this you?${RESET}"
   else
-    cecho "${CYAN}Cat noticed: you connected via ${MAGENTA}${CONNECTION_TYPE}${CYAN} from ${YELLOW}somewhere mysterious${CYAN}...${RESET}"
+    meow_echo "${CYAN}Cat noticed: you connected via ${MAGENTA}${CONNECTION_TYPE}${CYAN} from ${YELLOW}somewhere mysterious${CYAN}...${RESET}"
   fi
 else
   TTY_INFO="${TTY:-}"
   [[ -n "$TTY_INFO" ]] || TTY_INFO="$(tty 2>/dev/null)"
   [[ -n "$TTY_INFO" ]] && TTY_INFO="${YELLOW}${TTY_INFO}${RESET}" || TTY_INFO="${YELLOW}unknown${RESET}"
-  cecho "${CYAN}Cat noticed: you're on local terminal ${TTY_INFO}${RESET}"
+  meow_echo "${CYAN}Cat noticed: you're on local terminal ${TTY_INFO}${RESET}"
 fi
 
-cecho "${CYAN}Cat sniffed the machine: hostname ${YELLOW}${HOST_NAME}${RESET}"
-cecho "${CYAN}Cat checked your primary IP: ${YELLOW}${IP_ADDR}${RESET}"
-cecho "${CYAN}Cat checked the uptime: ${YELLOW}${UP_TIME}${RESET}"
+meow_echo "${CYAN}Cat sniffed the machine: hostname ${YELLOW}${HOST_NAME}${RESET}"
+meow_echo "${CYAN}Cat checked your primary IP: ${YELLOW}${IP_ADDR}${RESET}"
+meow_echo "${CYAN}Cat checked the uptime: ${YELLOW}${UP_TIME}${RESET}"
 
 if [[ -n "$BATTERY" ]]; then
   BAT_VAL=${BATTERY%\%}
@@ -734,10 +760,10 @@ if [[ -n "$BATTERY" ]]; then
     BAT_TEXT="Battery looks healthy. Have a nice meowing day!"
   fi
 
-  cecho "${CYAN}Battery level: ${BAT_COLOR}${BATTERY}${CYAN}, ${BAT_TEXT}${RESET}"
+  meow_echo "${CYAN}Battery level: ${BAT_COLOR}${BATTERY}${CYAN}, ${BAT_TEXT}${RESET}"
 fi
 
-cecho ""
+meow_echo ""
 
 CAT_ART_1=(
 "       I'm hungry!  "
@@ -820,28 +846,19 @@ for (( row_index = 1; row_index <= row_count; row_index++ )); do
   printf '%b %b\n' "${DEVICE_ART[row_index]:-$MEOW_ART_PAD}" "${INFO_LINES[row_index]:-}"
 done
 
-cecho ""
-cecho "${DIM}============================================================${RESET}"
-cecho ""
+meow_echo ""
+meow_echo "${DIM}============================================================${RESET}"
+meow_echo ""
 
 meow_cache_save
 
-unfunction -m 'meow_*' cecho 2>/dev/null
-unset -m 'MEOW_*' 2>/dev/null
-unset RESET PINK CYAN YELLOW MAGENTA GREEN ORANGE BLUE DIM LIGHT_GREEN RED \
-      HOST_NAME ARCH MODEL_NAME CHIP CPU_CORES CPU_CORE_TEXT IP_ADDR UP_TIME \
-      BATTERY CPU_USAGE VM_USED VM_TOTAL RAM_PERCENT SWAP_USED SWAP_TOTAL \
-      SWAP_PERCENT DISK_USED DISK_TOTAL DISK_PERCENT WELCOMES WELCOME \
-      CAT_1 CAT_2 CAT_1_TAIL CAT_2_TAIL CAT_1_TEXT CAT_2_TEXT USER_NAME \
-      CONNECTION_TYPE LOGIN_IP TTY_INFO BAT_VAL BAT_COLOR BAT_TEXT \
-      CPU_BAR RAM_BAR DISK_BAR SWAP_BAR GPU_BAR MEM_BAR MEM_COLOR MEM_PRESSURE \
-      RAM_USED RAM_TOTAL \
-      CPU_COLOR RAM_COLOR DISK_COLOR SWAP_COLOR GPU_COLOR GPU_INDEX \
-      CAT_ART_1 CAT_ART_2 RAW_ART DEVICE_ART INFO_LINES art_index row_index row_count \
-      line util 2>/dev/null
+# Functions are always global in zsh, so they are removed by hand. Every
+# variable above is local and goes away on its own when this function returns.
+unfunction -m 'meow_*' 2>/dev/null
 
 if (( $+commands[fastfetch] )); then
   fastfetch
 else
   printf '%b\n' "\033[38;5;201mfastfetch not installed\033[0m"
 fi
+}
